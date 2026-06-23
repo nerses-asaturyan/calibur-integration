@@ -1,0 +1,38 @@
+# ---- Secrets (NEVER commit) ----
+.env
+.env.*
+!.env.example
+
+# ---- Local tooling (not for GitHub) ----
+.claude/
+CLAUDE.md
+
+# ---- Foundry build artifacts ----
+/out/
+/cache/
+/broadcast/
+# (dependencies in lib/ are tracked as git submodules — see .gitmodules)
+
+# ---- Coverage / profiling ----
+lcov.info
+*.lcov
+coverage/
+.gas-snapshot
+
+# ---- Logs ----
+*.log
+
+# ---- Editor / OS junk ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Node (only if tooling is ever added) ----
+node_modules/
+
+# ---- Docs build ----
+docs/book/
