@@ -19,6 +19,12 @@ interface ILayerswapDepository {
     /// @notice Forward `amount` of `token` from the caller to a whitelisted `receiver`.
     function depositERC20(bytes32 id, address token, address receiver, uint256 amount) external;
 
+    /// @notice Forward the caller's WHOLE `token` balance to a whitelisted `receiver`
+    ///         (balance read at run time — the dynamic-amount, zero-dust variant).
+    /// @dev    Only on our own deployment of the depository, not the original
+    ///         0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4.
+    function depositERC20All(bytes32 id, address token, address receiver) external;
+
     /// @notice Forward msg.value of native token to a whitelisted `receiver`.
     function depositNative(bytes32 id, address receiver) external payable;
 

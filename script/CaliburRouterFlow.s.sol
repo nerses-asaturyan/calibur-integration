@@ -11,62 +11,52 @@ import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {IUniversalRouter} from "../src/interfaces/IUniversalRouter.sol";
 import {IQuoterV2} from "../src/interfaces/IQuoterV2.sol";
 
-/// @title CaliburRouterFlowScript
+/// @title CaliburRouterFlowScript (v2 — zero dust)
 /// @notice End-to-end Sepolia demo of a GASLESS, post-deposit DeFi flow executed
-///         as ONE atomic, relayer-sponsored Calibur (EIP-7702 / ERC-7821) batch,
-///         with ZERO new contracts of our own.
+///         as ONE atomic, relayer-sponsored Calibur (EIP-7702 / ERC-7821) batch.
+///         v2 targets OUR OWN LayerswapDepository deployment, whose
+///         `depositERC20All` forwards the caller's WHOLE balance — so the final
+///         deposit amount is fully dynamic and NOTHING is left behind (zero dust).
 ///
 /// FLOW (all in a single atomic batch; any failure reverts everything):
 ///   1. GASLESS INBOUND — USDC.receiveWithAuthorization(user -> executor): the
 ///      payer signs an EIP-3009 authorization off-chain; the relayer submits it.
-///      (EIP-3009 requires msg.sender == `to`, and the executor IS the batch
-///      caller, so `to` = executor.)
 ///   2. USDC.transfer(universalRouter, amountIn) — pre-fund the router so its
-///      commands can operate on `CONTRACT_BALANCE` (payerIsUser = false).
-///   3. UniversalRouter.execute(...) — the whole DYNAMIC chain lives here, using
-///      Uniswap's UNOWNED router. Each leg consumes the previous leg's output via
-///      the CONTRACT_BALANCE sentinel, so no intermediate amount is known at sign
-///      time:
-///        a. V3_SWAP_EXACT_IN  USDC -> WETH            (real Uniswap v3, feeIn pool)
-///        b. UNWRAP_WETH + WRAP_ETH  WETH->ETH->WETH   (see AAVE SUBSTITUTE below)
-///        c. V3_SWAP_EXACT_IN  WETH -> USDC            (see 0x SUBSTITUTE below)
-///        d. TRANSFER  small fee (absolute) -> fee-recipient EOA
-///        e. SWEEP     remainder -> executor           (min-out guarded)
-///   4. USDC.approve(depository, floor)
-///   5. LayerswapDepository.depositERC20(id, USDC, receiver, floor) — deposits the
-///      slippage-computed FLOOR amount and emits Layerswap's `Deposited` event.
+///      commands operate on CONTRACT_BALANCE (payerIsUser = false).
+///   3. UniversalRouter.execute(...) — the DYNAMIC chain, in Uniswap's UNOWNED
+///      router; each leg consumes the previous leg's output via CONTRACT_BALANCE:
+///        a. V3_SWAP_EXACT_IN  USDC -> WETH   (pool 1: USDC/WETH feeA)
+///        b. UNWRAP_WETH + WRAP_ETH            (native ETH round-trip on WETH9)
+///        c. V3_SWAP_EXACT_IN  WETH -> UNI    (pool 2: WETH/UNI  feeB)
+///        d. V3_SWAP_EXACT_IN  UNI  -> WETH   (pool 3: UNI/WETH  feeC)
+///        e. V3_SWAP_EXACT_IN  WETH -> USDC   (pool 4: WETH/USDC feeD)
+///        f. TRANSFER  small fee (absolute) -> fee-recipient EOA
+///        g. SWEEP     ALL remaining USDC -> executor (min-out guarded by floor)
+///   4. USDC.approve(depository, type(uint256).max)
+///   5. LayerswapDepository.depositERC20All(id, USDC, receiver) — forwards the
+///      executor's ENTIRE USDC balance (the dynamic sweep + any historical dust)
+///      and emits `Deposited` with the true amount. ZERO dust remains.
+///   6. USDC.approve(depository, 0) — hygiene: drop the standing allowance.
 ///
-/// WHY A FLOOR ON STEP 5 (the one "partial" leg): an unowned router cannot call an
-/// arbitrary function like `depositERC20`, and a static Calibur `Call` must name an
-/// exact amount at sign time. So the router SWEEPs the (dynamic) remainder back to
-/// the executor, and we deposit a conservative floor = minUsdcBack - feeAmount.
-/// Any excess above the floor stays as dust in the executor. The SWAPS are fully
-/// dynamic; only this final deposit amount is floored.
+/// WHY THIS IS NOW ZERO-DUST: v1 had to deposit a slippage-computed FLOOR
+/// (a static `Call` must name an exact amount), leaving the excess as dust in the
+/// executor. `depositERC20All` reads the executor's balance AT RUN TIME, so the
+/// exact dynamic amount — whatever the swaps actually produced — is deposited.
+/// The floor now only guards the SWEEP's min-out (slippage protection), it no
+/// longer caps the deposit.
 ///
-/// SUBSTITUTIONS (flagged per the task; Sepolia has no usable route for the
-/// originals with real liquidity):
-///   * 0x SWAP  -> a second real Uniswap v3 hop (feeOut pool). 0x's Swap API is
-///     mainnet-only (no Sepolia deployment) and needs an off-chain HTTP call.
-///   * AAVE supply/withdraw -> canonical WETH9 unwrap→rewrap round-trip, done
-///     natively by the router. Aave v3 Sepolia's reserves are Aave's own faucet
-///     test tokens (not Circle USDC / not canonical WETH9), which have no Uniswap
-///     liquidity — so no atomic route feeds real swap liquidity into real Aave.
-///     WETH9 is a real Sepolia contract; wrap/unwrap is the nearest "put an asset
-///     in, take it back out" analog.
+/// FOUR REAL UNISWAP V3 POOLS + a native WETH9 unwrap/rewrap in one batch:
+///   USDC/WETH 0.30%  ->  (ETH round-trip)  ->  WETH/UNI 0.30%  ->
+///   UNI/WETH 0.05%   ->  WETH/USDC 0.05%
 ///
 /// ROLES (same two-key model as the rest of the repo):
-///   * PRIVATE_KEY / OPERATOR_PRIVATE_KEY — the relayer/sponsor EOA, delegated to
-///     Calibur via EIP-7702. It broadcasts, pays ALL gas, and IS the executor and
-///     the EIP-3009 `to`. (Run EnableDelegation.s.sol first.)
-///   * USER_PRIVATE_KEY — the payer. Signs the EIP-3009 auth off-chain; pays no gas.
-///
-/// PREREQUISITES: executor delegated to Calibur (EnableDelegation.s.sol); payer
-/// holds >= AMOUNT_IN Circle USDC; relayer holds Sepolia ETH for gas; a working
-/// SEPOLIA_RPC_URL (the repo's Infura key currently 401s for Sepolia).
+///   * PRIVATE_KEY — the relayer/sponsor EOA, delegated to Calibur via EIP-7702.
+///     It broadcasts, pays ALL gas, and IS the executor and the EIP-3009 `to`.
+///   * USER_PRIVATE_KEY — the payer. Signs the EIP-3009 auth off-chain; no gas.
 ///
 /// Usage:
 ///   forge script script/CaliburRouterFlow.s.sol:CaliburRouterFlowScript \
-///     --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv
+///     --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
 contract CaliburRouterFlowScript is Script {
     // ERC-7821 single-batch execution mode (no opData).
     bytes32 internal constant ERC7821_BATCH_MODE =
@@ -84,34 +74,44 @@ contract CaliburRouterFlowScript is Script {
     bytes1 internal constant UNWRAP_WETH = 0x0c;
 
     // --- Universal Router sentinels (Constants.sol) ---
-    // "use the router's entire current balance of the input token"
     uint256 internal constant CONTRACT_BALANCE = 0x8000000000000000000000000000000000000000000000000000000000000000;
-    // recipient == the router itself (leave output in-router for the next command)
     address internal constant ADDRESS_THIS = address(2);
 
-    // Default Sepolia infra (all overridable via env; nothing user-specific hardcoded).
+    // Default Sepolia infra (all overridable via env).
     address internal constant DEFAULT_WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
+    address internal constant DEFAULT_UNI = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984;
     address internal constant DEFAULT_ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b; // Universal Router
     address internal constant DEFAULT_QUOTER = 0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3; // QuoterV2
 
-    /// @dev All demo parameters, resolved from env, kept in one struct to keep the
-    ///      command/batch builders below out of stack-too-deep territory.
     struct Cfg {
-        address usdc; // Circle EIP-3009 USDC (the gaslessly-received token)
+        address usdc; // Circle EIP-3009 USDC
         address weth; // canonical WETH9
+        address uni; // Sepolia UNI
         address router; // Uniswap Universal Router
         address quoter; // Uniswap QuoterV2 (off-chain pricing only)
-        address depository; // LayerswapDepository
-        address receiver; // whitelisted Layerswap receiver (final destination)
+        address depository; // OUR LayerswapDepository (has depositERC20All)
+        address receiver; // whitelisted Layerswap receiver
         address feeRecipient; // fee EOA
         address executor; // Calibur account (delegated relayer EOA) == EIP-3009 `to`
         address user; // EIP-3009 payer
-        uint24 feeIn; // Uniswap pool fee for USDC->WETH
-        uint24 feeOut; // Uniswap pool fee for WETH->USDC
+        uint24 feeA; // pool 1: USDC/WETH
+        uint24 feeB; // pool 2: WETH/UNI
+        uint24 feeC; // pool 3: UNI/WETH
+        uint24 feeD; // pool 4: WETH/USDC
         uint256 amountIn; // USDC pulled in gaslessly
         uint256 feeAmount; // absolute USDC fee to the fee EOA
         uint256 slippageBps; // per-leg slippage tolerance (bps)
         bytes32 depositId; // Layerswap order correlation id
+    }
+
+    /// @dev Per-hop guaranteed minimum outputs (each priced from the previous
+    ///      hop's minimum, so every min is genuinely achievable on-chain).
+    struct Mins {
+        uint256 weth1; // after hop a (USDC -> WETH)
+        uint256 uni; // after hop c (WETH -> UNI)
+        uint256 weth2; // after hop d (UNI -> WETH)
+        uint256 usdcBack; // after hop e (WETH -> USDC)
+        uint256 sweepFloor; // usdcBack - feeAmount (SWEEP min-out only, NOT the deposit amount)
     }
 
     function run() external {
@@ -122,47 +122,14 @@ contract CaliburRouterFlowScript is Script {
         _validate(c);
         _preflight(c);
 
-        // Split into two frames to stay clear of stack-too-deep without viaIR:
-        //   1. price the legs + encode the router program (the dynamic chain);
-        //   2. sign the EIP-3009 inbound + assemble the 5-call atomic batch.
-        (bytes memory routerCall, uint256 floor) = _buildRouterCall(c);
-        (Call[] memory calls, bytes32 authNonce) = _finalizeBatch(c, userPk, routerCall, floor);
+        (bytes memory routerCall, Mins memory m) = _buildRouterCall(c);
+        (Call[] memory calls, bytes32 authNonce) = _finalizeBatch(c, userPk, routerCall);
 
-        // --- Relayer submits and pays all gas ---
         vm.startBroadcast(broadcasterPk);
         IERC7821(c.executor).execute(ERC7821_BATCH_MODE, abi.encode(calls));
         vm.stopBroadcast();
 
-        _logSummary(c, authNonce);
-    }
-
-    /// @dev Prices each swap leg off-chain (conservative: leg 2 is priced from
-    ///      leg 1's *minimum* output so the floor is always achievable), then
-    ///      encodes the Universal Router program that carries the dynamic chain.
-    function _buildRouterCall(Cfg memory c) internal returns (bytes memory routerCall, uint256 floor) {
-        uint256 minWeth = _applySlippage(_quote(c.quoter, c.usdc, c.weth, c.amountIn, c.feeIn), c.slippageBps);
-        uint256 minUsdcBack = _applySlippage(_quote(c.quoter, c.weth, c.usdc, minWeth, c.feeOut), c.slippageBps);
-        require(minUsdcBack > c.feeAmount, "FEE_AMOUNT >= guaranteed output; lower it");
-        floor = minUsdcBack - c.feeAmount; // exact amount deposited to Layerswap
-
-        _logPlan(c, minWeth, minUsdcBack, floor);
-
-        (bytes memory commands, bytes[] memory inputs) = _buildRouterProgram(c, minWeth, minUsdcBack, floor);
-        uint256 routerDeadline = block.timestamp + 30 minutes;
-        routerCall = abi.encodeCall(IUniversalRouter.execute, (commands, inputs, routerDeadline));
-    }
-
-    /// @dev Signs the gasless EIP-3009 authorization (payer key) and assembles the
-    ///      5-call batch. Not `view`: vm.randomUint() is state-mutating.
-    function _finalizeBatch(Cfg memory c, uint256 userPk, bytes memory routerCall, uint256 floor)
-        internal
-        view
-        returns (Call[] memory calls, bytes32 authNonce)
-    {
-        uint256 validBefore = block.timestamp + 10 minutes;
-        authNonce = bytes32(vm.randomUint());
-        (uint8 v, bytes32 r, bytes32 s) = _signAuth(userPk, c, validBefore, authNonce);
-        calls = _buildBatch(c, routerCall, floor, validBefore, authNonce, v, r, s);
+        _logSummary(c, m, authNonce);
     }
 
     // -------------------------------------------------------------------------
@@ -172,6 +139,7 @@ contract CaliburRouterFlowScript is Script {
     function _loadCfg(uint256 broadcasterPk, uint256 userPk) internal view returns (Cfg memory c) {
         c.usdc = vm.envAddress("USDC_SEPOLIA");
         c.weth = vm.envOr("WETH_SEPOLIA", DEFAULT_WETH);
+        c.uni = vm.envOr("UNI_SEPOLIA", DEFAULT_UNI);
         c.router = vm.envOr("UNIVERSAL_ROUTER", DEFAULT_ROUTER);
         c.quoter = vm.envOr("UNISWAP_QUOTER", DEFAULT_QUOTER);
         c.depository = vm.envAddress("LAYERSWAP_DEPOSITORY");
@@ -181,20 +149,24 @@ contract CaliburRouterFlowScript is Script {
         c.user = vm.addr(userPk);
         address userEnv = vm.envOr("USER_ADDRESS", address(0));
         require(userEnv == address(0) || userEnv == c.user, "USER_ADDRESS != addr(USER_PRIVATE_KEY)");
-        // executor == EIP-3009 `to` == the delegated relayer account (NOT the impl).
         c.executor = vm.envOr("CALIBUR_EXECUTOR", vm.addr(broadcasterPk));
 
-        c.feeIn = uint24(vm.envOr("POOL_FEE_IN", uint256(3000)));
-        c.feeOut = uint24(vm.envOr("POOL_FEE_OUT", uint256(500)));
+        // Fee tiers of the four pools (defaults = the liquid Sepolia pools).
+        c.feeA = uint24(vm.envOr("POOL_FEE_A", uint256(3000))); // USDC/WETH
+        c.feeB = uint24(vm.envOr("POOL_FEE_B", uint256(3000))); // WETH/UNI
+        c.feeC = uint24(vm.envOr("POOL_FEE_C", uint256(500))); // UNI/WETH
+        c.feeD = uint24(vm.envOr("POOL_FEE_D", uint256(500))); // WETH/USDC
+
         c.amountIn = vm.envUint("AMOUNT_IN");
         c.feeAmount = vm.envUint("FEE_AMOUNT");
-        c.slippageBps = vm.envOr("SLIPPAGE_BPS", uint256(100)); // default 1%
+        c.slippageBps = vm.envOr("SLIPPAGE_BPS", uint256(100)); // default 1% per leg
         c.depositId = vm.envOr("DEPOSIT_ID", bytes32(vm.randomUint()));
     }
 
     function _validate(Cfg memory c) internal pure {
         require(c.usdc != address(0), "USDC_SEPOLIA is zero");
         require(c.weth != address(0), "WETH is zero");
+        require(c.uni != address(0), "UNI is zero");
         require(c.router != address(0), "router is zero");
         require(c.quoter != address(0), "quoter is zero");
         require(c.depository != address(0), "LAYERSWAP_DEPOSITORY is zero");
@@ -213,12 +185,16 @@ contract CaliburRouterFlowScript is Script {
             console2.log("WARNING: LayerswapDepository is paused; deposit will revert (batch reverts atomically).");
         }
         if (!dep.isWhitelisted(c.receiver)) {
-            console2.log("WARNING: DEPOSIT_RECEIVER is NOT whitelisted; depositERC20 reverts (NotWhitelisted).");
+            console2.log("WARNING: DEPOSIT_RECEIVER is NOT whitelisted; depositERC20All reverts (NotWhitelisted).");
             console2.log("  receiver:", c.receiver);
         }
         if (c.executor.code.length == 0) {
             console2.log("WARNING: executor has NO code -> not delegated to Calibur. Run EnableDelegation.s.sol first.");
             console2.log("  executor:", c.executor);
+        }
+        uint256 priorDust = IERC20(c.usdc).balanceOf(c.executor);
+        if (priorDust > 0) {
+            console2.log("NOTE: executor holds pre-existing USDC that depositERC20All will sweep into the deposit:", priorDust);
         }
     }
 
@@ -245,50 +221,79 @@ contract CaliburRouterFlowScript is Script {
     }
 
     // -------------------------------------------------------------------------
-    // Router program (the dynamic swap chain + payouts)
+    // Router program (the dynamic 4-pool chain + payouts)
     // -------------------------------------------------------------------------
 
-    function _buildRouterProgram(Cfg memory c, uint256 minWeth, uint256 minUsdcBack, uint256 floor)
+    /// @dev Price the four hops (each from the previous hop's minimum), then
+    ///      encode the Universal Router program carrying the dynamic chain.
+    function _buildRouterCall(Cfg memory c) internal returns (bytes memory routerCall, Mins memory m) {
+        m.weth1 = _applySlippage(_quote(c.quoter, c.usdc, c.weth, c.amountIn, c.feeA), c.slippageBps);
+        m.uni = _applySlippage(_quote(c.quoter, c.weth, c.uni, m.weth1, c.feeB), c.slippageBps);
+        m.weth2 = _applySlippage(_quote(c.quoter, c.uni, c.weth, m.uni, c.feeC), c.slippageBps);
+        m.usdcBack = _applySlippage(_quote(c.quoter, c.weth, c.usdc, m.weth2, c.feeD), c.slippageBps);
+        require(m.usdcBack > c.feeAmount, "FEE_AMOUNT >= guaranteed output; lower it");
+        m.sweepFloor = m.usdcBack - c.feeAmount;
+
+        _logPlan(c, m);
+
+        (bytes memory commands, bytes[] memory inputs) = _buildRouterProgram(c, m);
+        uint256 routerDeadline = block.timestamp + 30 minutes;
+        routerCall = abi.encodeCall(IUniversalRouter.execute, (commands, inputs, routerDeadline));
+    }
+
+    function _buildRouterProgram(Cfg memory c, Mins memory m)
         internal
         pure
         returns (bytes memory commands, bytes[] memory inputs)
     {
-        // Sequence: swap -> unwrap -> wrap -> swap -> fee transfer -> sweep remainder.
-        commands = abi.encodePacked(V3_SWAP_EXACT_IN, UNWRAP_WETH, WRAP_ETH, V3_SWAP_EXACT_IN, TRANSFER, SWEEP);
+        // swap -> unwrap -> rewrap -> swap -> swap -> swap -> fee transfer -> sweep.
+        commands = abi.encodePacked(
+            V3_SWAP_EXACT_IN, UNWRAP_WETH, WRAP_ETH, V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, TRANSFER, SWEEP
+        );
 
-        // v3 path = tokenIn | fee(uint24) | tokenOut (tightly packed).
-        bytes memory pathIn = abi.encodePacked(c.usdc, c.feeIn, c.weth);
-        bytes memory pathOut = abi.encodePacked(c.weth, c.feeOut, c.usdc);
-
-        inputs = new bytes[](6);
-        // a. swap the router's whole USDC balance -> WETH (payerIsUser = false: funds already in router)
-        inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, minWeth, pathIn, false);
-        // b. AAVE SUBSTITUTE: unwrap all WETH -> ETH, then rewrap all ETH -> WETH (net no-op on WETH)
-        inputs[1] = abi.encode(ADDRESS_THIS, minWeth);
+        inputs = new bytes[](8);
+        // a. pool 1: swap the router's whole USDC balance -> WETH
+        inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.weth1, abi.encodePacked(c.usdc, c.feeA, c.weth), false);
+        // b. native ETH round-trip: unwrap all WETH -> ETH, rewrap all ETH -> WETH (WETH9)
+        inputs[1] = abi.encode(ADDRESS_THIS, m.weth1);
         inputs[2] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE);
-        // c. 0x SUBSTITUTE: swap the router's whole WETH balance -> USDC (second Uniswap hop)
-        inputs[3] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, minUsdcBack, pathOut, false);
-        // d. pay the small absolute fee to the fee EOA
-        inputs[4] = abi.encode(c.usdc, c.feeRecipient, c.feeAmount);
-        // e. sweep the remaining USDC back to the executor (guarded by the floor)
-        inputs[5] = abi.encode(c.usdc, c.executor, floor);
+        // c. pool 2: WETH -> UNI
+        inputs[3] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.uni, abi.encodePacked(c.weth, c.feeB, c.uni), false);
+        // d. pool 3: UNI -> WETH
+        inputs[4] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.weth2, abi.encodePacked(c.uni, c.feeC, c.weth), false);
+        // e. pool 4: WETH -> USDC
+        inputs[5] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.usdcBack, abi.encodePacked(c.weth, c.feeD, c.usdc), false);
+        // f. pay the small absolute fee to the fee EOA
+        inputs[6] = abi.encode(c.usdc, c.feeRecipient, c.feeAmount);
+        // g. sweep ALL remaining USDC to the executor (min-out = sweepFloor)
+        inputs[7] = abi.encode(c.usdc, c.executor, m.sweepFloor);
     }
 
     // -------------------------------------------------------------------------
     // Calibur batch
     // -------------------------------------------------------------------------
 
+    function _finalizeBatch(Cfg memory c, uint256 userPk, bytes memory routerCall)
+        internal
+        view
+        returns (Call[] memory calls, bytes32 authNonce)
+    {
+        uint256 validBefore = block.timestamp + 10 minutes;
+        authNonce = bytes32(vm.randomUint());
+        (uint8 v, bytes32 r, bytes32 s) = _signAuth(userPk, c, validBefore, authNonce);
+        calls = _buildBatch(c, routerCall, validBefore, authNonce, v, r, s);
+    }
+
     function _buildBatch(
         Cfg memory c,
         bytes memory routerCall,
-        uint256 floor,
         uint256 validBefore,
         bytes32 authNonce,
         uint8 v,
         bytes32 r,
         bytes32 s
     ) internal pure returns (Call[] memory calls) {
-        calls = new Call[](5);
+        calls = new Call[](6);
         // 1. gasless inbound: user -> executor
         calls[0] = Call({
             to: c.usdc,
@@ -302,14 +307,17 @@ contract CaliburRouterFlowScript is Script {
         calls[1] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.router, c.amountIn))});
         // 3. the entire dynamic DeFi chain, inside the unowned Universal Router
         calls[2] = Call({to: c.router, value: 0, data: routerCall});
-        // 4. approve exactly the floor for the depository pull
-        calls[3] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, floor))});
-        // 5. Layerswap deposit (emits Deposited); receiver must be whitelisted
+        // 4. approve max so depositERC20All can pull whatever the dynamic balance is
+        calls[3] =
+            Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, type(uint256).max))});
+        // 5. deposit the executor's ENTIRE USDC balance — the zero-dust deposit
         calls[4] = Call({
             to: c.depository,
             value: 0,
-            data: abi.encodeCall(ILayerswapDepository.depositERC20, (c.depositId, c.usdc, c.receiver, floor))
+            data: abi.encodeCall(ILayerswapDepository.depositERC20All, (c.depositId, c.usdc, c.receiver))
         });
+        // 6. hygiene: drop the standing allowance again
+        calls[5] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, 0))});
     }
 
     // -------------------------------------------------------------------------
@@ -335,35 +343,36 @@ contract CaliburRouterFlowScript is Script {
     // Logging
     // -------------------------------------------------------------------------
 
-    function _logPlan(Cfg memory c, uint256 minWeth, uint256 minUsdcBack, uint256 floor) internal pure {
+    function _logPlan(Cfg memory c, Mins memory m) internal pure {
         console2.log("==================================================");
-        console2.log("Calibur router-native gasless DeFi flow (Sepolia)");
+        console2.log("Calibur router-native gasless DeFi flow v2 (zero dust)");
         console2.log("--------------------------------------------------");
-        console2.log("STAGE 1  gasless inbound: USDC.receiveWithAuthorization(user -> executor)");
-        console2.log("  amountIn (USDC, 6dp):", c.amountIn);
+        console2.log("STAGE 1  gasless inbound: USDC.receiveWithAuthorization, amountIn:", c.amountIn);
         console2.log("STAGE 2  USDC.transfer(universalRouter, amountIn)");
-        console2.log("STAGE 3  UniversalRouter.execute():");
-        console2.log("  a. swap USDC -> WETH (Uniswap v3, feeIn), minOut:", minWeth);
-        console2.log("  b. AAVE SUBSTITUTE: WETH unwrap -> rewrap (WETH9)");
-        console2.log("  c. 0x SUBSTITUTE: swap WETH -> USDC (Uniswap v3, feeOut), minOut:", minUsdcBack);
-        console2.log("  d. TRANSFER fee -> feeRecipient:", c.feeAmount);
-        console2.log("  e. SWEEP remainder -> executor (min:", floor);
-        console2.log("STAGE 4  USDC.approve(depository, floor)");
-        console2.log("STAGE 5  LayerswapDepository.depositERC20(floor):", floor);
-        console2.log("  (dust above the floor stays in the executor)");
+        console2.log("STAGE 3  UniversalRouter.execute() -- 4 pools + native ETH round-trip:");
+        console2.log("  a. USDC -> WETH (pool 1), minOut:", m.weth1);
+        console2.log("  b. WETH unwrap -> rewrap (WETH9 native round-trip)");
+        console2.log("  c. WETH -> UNI  (pool 2), minOut:", m.uni);
+        console2.log("  d. UNI  -> WETH (pool 3), minOut:", m.weth2);
+        console2.log("  e. WETH -> USDC (pool 4), minOut:", m.usdcBack);
+        console2.log("  f. TRANSFER fee -> feeRecipient:", c.feeAmount);
+        console2.log("  g. SWEEP ALL remaining USDC -> executor, min:", m.sweepFloor);
+        console2.log("STAGE 4  USDC.approve(depository, max)");
+        console2.log("STAGE 5  depositERC20All -- deposits the executor's WHOLE balance (zero dust)");
+        console2.log("STAGE 6  USDC.approve(depository, 0)");
         console2.log("--------------------------------------------------");
     }
 
-    function _logSummary(Cfg memory c, bytes32 authNonce) internal pure {
+    function _logSummary(Cfg memory c, Mins memory m, bytes32 authNonce) internal pure {
         console2.log("--------------------------------------------------");
         console2.log("Batch submitted by relayer (pays all gas).");
+        console2.log("  token path: USDC -> WETH -> (ETH) -> WETH -> UNI -> WETH -> USDC");
         console2.log("  user (EIP-3009 from):", c.user);
         console2.log("  executor (EIP-3009 to == relayer):", c.executor);
-        console2.log("  USDC in:", c.usdc);
-        console2.log("  universal router:", c.router);
         console2.log("  fee recipient EOA:", c.feeRecipient);
-        console2.log("  layerswap depository:", c.depository);
+        console2.log("  layerswap depository (ours, depositERC20All):", c.depository);
         console2.log("  layerswap receiver:", c.receiver);
+        console2.log("  guaranteed minimum deposited (floor):", m.sweepFloor);
         console2.log("  auth nonce:");
         console2.logBytes32(authNonce);
         console2.log("  deposit id:");

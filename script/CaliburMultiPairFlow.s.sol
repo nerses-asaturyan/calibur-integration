@@ -10,13 +10,14 @@ import {IERC3009USDC} from "../src/interfaces/IERC3009USDC.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {IUniversalRouter} from "../src/interfaces/IUniversalRouter.sol";
 import {IQuoterV2} from "../src/interfaces/IQuoterV2.sol";
+import {IAaveV3Pool} from "../src/interfaces/IAaveV3Pool.sol";
 
-/// @title CaliburMultiPairFlowScript
-/// @notice Variant of CaliburRouterFlow that (a) uses THREE distinct EOAs and
-///         (b) routes through THREE DIFFERENT token pairs, so the swap chain is
-///         visually obvious on a block explorer. Still ZERO new contracts: the
-///         dynamic multi-hop chaining runs inside Uniswap's unowned Universal
-///         Router via the CONTRACT_BALANCE sentinel.
+/// @title CaliburMultiPairFlowScript (v2 — REAL Aave v3 + zero dust)
+/// @notice The flagship variant: THREE distinct EOAs, SIX swaps across FIVE
+///         different Uniswap v3 pools, a REAL Aave v3 supply+withdraw in the
+///         middle, and a zero-dust finish via our depository's `depositERC20All`.
+///         All dynamic chaining is delegated to Uniswap's unowned Universal
+///         Router and Aave — no orchestration contract of our own.
 ///
 /// THREE DISTINCT ROLES (all different addresses; enforced in _validate):
 ///   * payer (USER_PRIVATE_KEY)          — holds USDC, signs the EIP-3009 auth.
@@ -24,30 +25,50 @@ import {IQuoterV2} from "../src/interfaces/IQuoterV2.sol";
 ///       broadcasts, pays ALL gas, is the batch executor and EIP-3009 `to`.
 ///   * fee recipient (FEE_RECIPIENT)     — receives the fee; neither of the above.
 ///
-/// SWAP CHAIN (three different Uniswap v3 pairs, all real Sepolia liquidity):
-///   USDC --(pair 1: USDC/WETH)--> WETH --(pair 2: WETH/UNI)--> UNI
-///        --(pair 3: UNI/USDC)--> USDC
-/// Each leg feeds the next via CONTRACT_BALANCE, so no intermediate amount is
-/// known at sign time. We end back in USDC purely so the deposit amount is easy
-/// to read against the input; Layerswap is token-agnostic, so any final token
-/// would work.
+/// HOW REAL AAVE BECOMES ATOMICALLY REACHABLE: Aave v3 Sepolia's reserves are
+/// Aave's own faucet tokens, not the canonical assets — but a real Uniswap v3
+/// pool (canonical WETH9 / aaveWETH, 0.30%) bridges them. We use the WETH
+/// reserve because it has NO supply cap (the aaveUSDC/aaveDAI reserves sit above
+/// their caps, so `supply` reverts SUPPLY_CAP_EXCEEDED there). And Aave's
+/// `withdraw(asset, type(uint256).max, to)` is a DYNAMIC-amount primitive that
+/// can pay straight to the Universal Router, so the chain re-enters the router
+/// with no static-amount hop. Supplying and withdrawing in the SAME transaction
+/// round-trips the exact amount (no time passes -> no interest accrues).
 ///
-/// ONE atomic 5-call Calibur batch (any revert rolls back everything, incl. the
-/// EIP-3009 receive):
-///   1. USDC.receiveWithAuthorization(user -> executor)       // gasless inbound
-///   2. USDC.transfer(universalRouter, amountIn)              // pre-fund router
-///   3. UniversalRouter.execute():
-///        V3_SWAP_EXACT_IN USDC->WETH, WETH->UNI, UNI->USDC   // the 3-pair chain
-///        TRANSFER small fee -> fee recipient EOA             // payout 1
-///        SWEEP  remainder    -> executor                     // (guarded by floor)
-///   4. USDC.approve(depository, floor)
-///   5. LayerswapDepository.depositERC20(id, USDC, receiver, floor)  // payout 2
+/// ONE atomic 10-call Calibur batch (any revert rolls back everything):
+///   1. USDC.receiveWithAuthorization(user -> executor)      // gasless inbound
+///   2. USDC.transfer(universalRouter, amountIn)             // pre-fund router
+///   3. UniversalRouter.execute() — trip 1 (4 swaps):
+///        USDC -> WETH      (pool 1: USDC/WETH     0.30%)
+///        WETH -> UNI       (pool 2: WETH/UNI      0.30%)
+///        UNI  -> WETH      (pool 3: UNI/WETH      0.05%)
+///        WETH -> aaveWETH  (pool 4: bridge        0.30%), min = floorA
+///        TRANSFER floorA aaveWETH -> executor
+///        (the excess above floorA DELIBERATELY stays in the router — trip 2's
+///         CONTRACT_BALANCE swap consumes it, so it is never dust)
+///   4. aaveWETH.approve(aavePool, floorA)
+///   5. AavePool.supply(aaveWETH, floorA, executor, 0)       // REAL Aave supply
+///   6. AavePool.withdraw(aaveWETH, type(uint256).max, router) // REAL Aave
+///        withdraw of the executor's WHOLE aToken balance, paid DIRECTLY to the
+///        router (== exactly floorA: same-tx supply+withdraw accrues no interest)
+///   7. UniversalRouter.execute() — trip 2 (2 swaps):
+///        aaveWETH -> WETH (pool 4 again; consumes withdraw output + trip-1 excess)
+///        WETH -> USDC     (pool 5: WETH/USDC 0.05%)
+///        TRANSFER fee -> fee recipient EOA                  // payout 1
+///        SWEEP ALL remaining USDC -> executor (min-out guarded)
+///   8. USDC.approve(depository, type(uint256).max)
+///   9. LayerswapDepository.depositERC20All(id, USDC, receiver) // payout 2:
+///        deposits the executor's ENTIRE dynamic USDC balance — ZERO dust
+///  10. USDC.approve(depository, 0)                          // hygiene
 ///
-/// The Layerswap amount is a slippage-computed FLOOR (minUsdcBack - feeAmount)
-/// because an unowned router cannot call depositERC20 and a static Calibur Call
-/// must name an exact amount; excess over the floor stays as dust in the executor.
-/// (This variant drops the WETH wrap/unwrap "Aave substitute" from CaliburRouterFlow
-/// to keep the multi-pair swap path the visual focus.)
+/// ZERO DUST, EVERY TOKEN: trip-1's aaveWETH excess is consumed by trip 2;
+/// the executor's whole USDC balance is deposited by depositERC20All; all other
+/// legs run on CONTRACT_BALANCE so nothing lingers anywhere.
+///
+/// PRICING NOTE: the bridge pool's REVERSE leg (aaveWETH -> WETH) cannot be
+/// quoted at pre-trade state — the pool may hold ~no WETH-side liquidity until
+/// OUR forward leg deposits it. A same-pool round trip in one tx always returns
+/// >= input * (1-fee)^2, so that floor is computed analytically.
 ///
 /// Usage:
 ///   forge script script/CaliburMultiPairFlow.s.sol:CaliburMultiPairFlowScript \
@@ -71,14 +92,21 @@ contract CaliburMultiPairFlowScript is Script {
 
     // Sepolia infra / tokens (all overridable via env).
     address internal constant DEFAULT_WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
-    address internal constant DEFAULT_UNI = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984; // Sepolia UNI (liquid vs WETH & USDC)
+    address internal constant DEFAULT_UNI = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984;
     address internal constant DEFAULT_ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;
     address internal constant DEFAULT_QUOTER = 0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3;
+    // Aave v3 Sepolia (via PoolAddressesProvider 0x012bAC54348C0E635dCAc9D5FB99f06F24136C9A).
+    address internal constant DEFAULT_AAVE_POOL = 0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951;
+    // Aave v3 Sepolia's WETH reserve (Aave faucet token, NOT canonical WETH9).
+    // Chosen because its supply cap is 0 == UNLIMITED (aaveUSDC/aaveDAI are over cap).
+    address internal constant DEFAULT_AAVE_WETH = 0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c;
 
     struct Cfg {
         address usdc;
         address weth;
         address uni;
+        address aaveWeth;
+        address aavePool;
         address router;
         address quoter;
         address depository;
@@ -88,11 +116,24 @@ contract CaliburMultiPairFlowScript is Script {
         address user;
         uint24 fee1; // USDC/WETH
         uint24 fee2; // WETH/UNI
-        uint24 fee3; // UNI/USDC
+        uint24 fee3; // UNI/WETH
+        uint24 fee4; // WETH/USDC (trip 2 exit)
+        uint24 feeAave; // WETH/aaveWETH bridge pool (both directions)
         uint256 amountIn;
         uint256 feeAmount;
         uint256 slippageBps;
         bytes32 depositId;
+    }
+
+    /// @dev Guaranteed per-hop minimums, each priced from the previous minimum.
+    struct Mins {
+        uint256 weth1; // hop 1: USDC -> WETH
+        uint256 uni; // hop 2: WETH -> UNI
+        uint256 weth2; // hop 3: UNI -> WETH
+        uint256 floorA; // hop 4: WETH -> aaveWETH (the amount supplied to Aave)
+        uint256 wethBack; // trip 2: aaveWETH -> WETH (analytic round-trip floor)
+        uint256 usdcFinal; // trip 2: WETH -> USDC
+        uint256 sweepFloor; // usdcFinal - feeAmount (SWEEP min-out only)
     }
 
     function run() external {
@@ -103,20 +144,26 @@ contract CaliburMultiPairFlowScript is Script {
         _validate(c);
         _preflight(c);
 
-        (bytes memory routerCall, uint256 floor) = _buildRouterCall(c);
-        (Call[] memory calls, bytes32 authNonce) = _finalizeBatch(c, userPk, routerCall, floor);
+        (bytes memory trip1, bytes memory trip2, Mins memory m) = _buildRouterCalls(c);
+        (Call[] memory calls, bytes32 authNonce) = _finalizeBatch(c, userPk, trip1, trip2, m.floorA);
 
         vm.startBroadcast(broadcasterPk);
         IERC7821(c.executor).execute(ERC7821_BATCH_MODE, abi.encode(calls));
         vm.stopBroadcast();
 
-        _logSummary(c, authNonce);
+        _logSummary(c, m, authNonce);
     }
+
+    // -------------------------------------------------------------------------
+    // Config
+    // -------------------------------------------------------------------------
 
     function _loadCfg(uint256 broadcasterPk, uint256 userPk) internal view returns (Cfg memory c) {
         c.usdc = vm.envAddress("USDC_SEPOLIA");
         c.weth = vm.envOr("WETH_SEPOLIA", DEFAULT_WETH);
         c.uni = vm.envOr("UNI_SEPOLIA", DEFAULT_UNI);
+        c.aaveWeth = vm.envOr("AAVE_WETH_SEPOLIA", DEFAULT_AAVE_WETH);
+        c.aavePool = vm.envOr("AAVE_POOL_SEPOLIA", DEFAULT_AAVE_POOL);
         c.router = vm.envOr("UNIVERSAL_ROUTER", DEFAULT_ROUTER);
         c.quoter = vm.envOr("UNISWAP_QUOTER", DEFAULT_QUOTER);
         c.depository = vm.envAddress("LAYERSWAP_DEPOSITORY");
@@ -128,10 +175,11 @@ contract CaliburMultiPairFlowScript is Script {
         require(userEnv == address(0) || userEnv == c.user, "USER_ADDRESS != addr(USER_PRIVATE_KEY)");
         c.executor = vm.envOr("CALIBUR_EXECUTOR", vm.addr(broadcasterPk));
 
-        // Pair fee tiers (defaults are the liquid Sepolia pools).
         c.fee1 = uint24(vm.envOr("POOL_FEE_1", uint256(3000))); // USDC/WETH
         c.fee2 = uint24(vm.envOr("POOL_FEE_2", uint256(3000))); // WETH/UNI
-        c.fee3 = uint24(vm.envOr("POOL_FEE_3", uint256(500))); // UNI/USDC
+        c.fee3 = uint24(vm.envOr("POOL_FEE_3", uint256(500))); // UNI/WETH
+        c.fee4 = uint24(vm.envOr("POOL_FEE_4", uint256(500))); // WETH/USDC
+        c.feeAave = uint24(vm.envOr("POOL_FEE_AAVE", uint256(3000))); // WETH/aaveWETH
 
         c.amountIn = vm.envUint("AMOUNT_IN");
         c.feeAmount = vm.envUint("FEE_AMOUNT");
@@ -143,6 +191,8 @@ contract CaliburMultiPairFlowScript is Script {
         require(c.usdc != address(0), "USDC_SEPOLIA is zero");
         require(c.weth != address(0), "WETH is zero");
         require(c.uni != address(0), "UNI is zero");
+        require(c.aaveWeth != address(0), "aaveWETH is zero");
+        require(c.aavePool != address(0), "Aave pool is zero");
         require(c.router != address(0), "router is zero");
         require(c.quoter != address(0), "quoter is zero");
         require(c.depository != address(0), "LAYERSWAP_DEPOSITORY is zero");
@@ -164,53 +214,96 @@ contract CaliburMultiPairFlowScript is Script {
             console2.log("WARNING: LayerswapDepository is paused; deposit will revert (batch reverts atomically).");
         }
         if (!dep.isWhitelisted(c.receiver)) {
-            console2.log("WARNING: DEPOSIT_RECEIVER is NOT whitelisted; depositERC20 reverts (NotWhitelisted).");
+            console2.log("WARNING: DEPOSIT_RECEIVER is NOT whitelisted; depositERC20All reverts (NotWhitelisted).");
         }
         if (c.executor.code.length == 0) {
             console2.log("WARNING: executor has NO code -> not delegated to Calibur. Run EnableDelegation.s.sol first.");
         }
+        uint256 priorDust = IERC20(c.usdc).balanceOf(c.executor);
+        if (priorDust > 0) {
+            console2.log("NOTE: executor holds pre-existing USDC that depositERC20All will sweep into the deposit:", priorDust);
+        }
     }
 
-    /// @dev Price the three hops off-chain (each priced from the previous hop's
-    ///      minimum output, so the floor is always achievable), then encode the
-    ///      Universal Router program that carries the dynamic 3-pair chain.
-    function _buildRouterCall(Cfg memory c) internal returns (bytes memory routerCall, uint256 floor) {
-        uint256 minWeth = _applySlippage(_quote(c.quoter, c.usdc, c.weth, c.amountIn, c.fee1), c.slippageBps);
-        uint256 minUni = _applySlippage(_quote(c.quoter, c.weth, c.uni, minWeth, c.fee2), c.slippageBps);
-        uint256 minUsdcBack = _applySlippage(_quote(c.quoter, c.uni, c.usdc, minUni, c.fee3), c.slippageBps);
-        require(minUsdcBack > c.feeAmount, "FEE_AMOUNT >= guaranteed output; lower it");
-        floor = minUsdcBack - c.feeAmount;
+    // -------------------------------------------------------------------------
+    // Router programs (trip 1: 4 swaps into Aave's token; trip 2: back + payouts)
+    // -------------------------------------------------------------------------
 
-        _logPlan(c, minWeth, minUni, minUsdcBack, floor);
+    /// @dev Price every hop off-chain (each from the previous hop's minimum) and
+    ///      encode both Universal Router programs.
+    function _buildRouterCalls(Cfg memory c)
+        internal
+        returns (bytes memory trip1, bytes memory trip2, Mins memory m)
+    {
+        m.weth1 = _applySlippage(_quote(c.quoter, c.usdc, c.weth, c.amountIn, c.fee1), c.slippageBps);
+        m.uni = _applySlippage(_quote(c.quoter, c.weth, c.uni, m.weth1, c.fee2), c.slippageBps);
+        m.weth2 = _applySlippage(_quote(c.quoter, c.uni, c.weth, m.uni, c.fee3), c.slippageBps);
+        m.floorA = _applySlippage(_quote(c.quoter, c.weth, c.aaveWeth, m.weth2, c.feeAave), c.slippageBps);
+        // Reverse bridge leg (aaveWETH -> WETH) cannot be quoted at PRE-trade
+        // state: the pool may hold ~no WETH-side liquidity until OUR forward leg
+        // deposits it. A same-pool round trip in one tx always returns
+        // >= input * (1-fee)^2, so this floor is computed analytically.
+        m.wethBack =
+            _applySlippage((m.weth2 * (1e6 - c.feeAave) / 1e6) * (1e6 - c.feeAave) / 1e6, c.slippageBps);
+        m.usdcFinal = _applySlippage(_quote(c.quoter, c.weth, c.usdc, m.wethBack, c.fee4), c.slippageBps);
+        require(m.usdcFinal > c.feeAmount, "FEE_AMOUNT >= guaranteed output; lower it");
+        m.sweepFloor = m.usdcFinal - c.feeAmount;
 
-        (bytes memory commands, bytes[] memory inputs) = _buildRouterProgram(c, minWeth, minUni, minUsdcBack, floor);
-        uint256 routerDeadline = block.timestamp + 30 minutes;
-        routerCall = abi.encodeCall(IUniversalRouter.execute, (commands, inputs, routerDeadline));
+        _logPlan(c, m);
+
+        uint256 deadline = block.timestamp + 30 minutes;
+        (bytes memory cmds1, bytes[] memory in1) = _trip1Program(c, m);
+        (bytes memory cmds2, bytes[] memory in2) = _trip2Program(c, m);
+        trip1 = abi.encodeCall(IUniversalRouter.execute, (cmds1, in1, deadline));
+        trip2 = abi.encodeCall(IUniversalRouter.execute, (cmds2, in2, deadline));
     }
 
-    function _buildRouterProgram(Cfg memory c, uint256 minWeth, uint256 minUni, uint256 minUsdcBack, uint256 floor)
+    function _trip1Program(Cfg memory c, Mins memory m)
         internal
         pure
         returns (bytes memory commands, bytes[] memory inputs)
     {
-        // 3 swaps (different pairs) -> fee transfer -> sweep remainder.
-        commands = abi.encodePacked(V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, TRANSFER, SWEEP);
-
-        bytes memory path1 = abi.encodePacked(c.usdc, c.fee1, c.weth); // pair 1: USDC/WETH
-        bytes memory path2 = abi.encodePacked(c.weth, c.fee2, c.uni); // pair 2: WETH/UNI
-        bytes memory path3 = abi.encodePacked(c.uni, c.fee3, c.usdc); // pair 3: UNI/USDC
+        // 4 swaps across 4 different pools, then hand floorA of aaveWETH to the
+        // executor for the Aave leg. NO sweep: the excess above floorA stays in
+        // the router on purpose — trip 2's CONTRACT_BALANCE swap consumes it.
+        commands =
+            abi.encodePacked(V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, TRANSFER);
 
         inputs = new bytes[](5);
-        // payerIsUser = false: funds are already in the router (pre-funded in call 2);
-        // amountIn = CONTRACT_BALANCE: consume the full output of the previous hop.
-        inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, minWeth, path1, false);
-        inputs[1] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, minUni, path2, false);
-        inputs[2] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, minUsdcBack, path3, false);
-        inputs[3] = abi.encode(c.usdc, c.feeRecipient, c.feeAmount); // TRANSFER fee
-        inputs[4] = abi.encode(c.usdc, c.executor, floor); // SWEEP remainder to executor (min = floor)
+        inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.weth1, abi.encodePacked(c.usdc, c.fee1, c.weth), false);
+        inputs[1] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.uni, abi.encodePacked(c.weth, c.fee2, c.uni), false);
+        inputs[2] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.weth2, abi.encodePacked(c.uni, c.fee3, c.weth), false);
+        inputs[3] = abi.encode(
+            ADDRESS_THIS, CONTRACT_BALANCE, m.floorA, abi.encodePacked(c.weth, c.feeAave, c.aaveWeth), false
+        );
+        inputs[4] = abi.encode(c.aaveWeth, c.executor, m.floorA); // exactly floorA out for the Aave leg
     }
 
-    function _finalizeBatch(Cfg memory c, uint256 userPk, bytes memory routerCall, uint256 floor)
+    function _trip2Program(Cfg memory c, Mins memory m)
+        internal
+        pure
+        returns (bytes memory commands, bytes[] memory inputs)
+    {
+        // Swap back everything the router now holds of aaveWETH (the Aave
+        // withdraw paid here directly + trip-1's excess), exit to USDC, then the
+        // two payouts.
+        commands = abi.encodePacked(V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN, TRANSFER, SWEEP);
+
+        inputs = new bytes[](4);
+        inputs[0] = abi.encode(
+            ADDRESS_THIS, CONTRACT_BALANCE, m.wethBack, abi.encodePacked(c.aaveWeth, c.feeAave, c.weth), false
+        );
+        inputs[1] =
+            abi.encode(ADDRESS_THIS, CONTRACT_BALANCE, m.usdcFinal, abi.encodePacked(c.weth, c.fee4, c.usdc), false);
+        inputs[2] = abi.encode(c.usdc, c.feeRecipient, c.feeAmount); // payout 1: fee
+        inputs[3] = abi.encode(c.usdc, c.executor, m.sweepFloor); // sweep ALL USDC to executor
+    }
+
+    // -------------------------------------------------------------------------
+    // Calibur batch
+    // -------------------------------------------------------------------------
+
+    function _finalizeBatch(Cfg memory c, uint256 userPk, bytes memory trip1, bytes memory trip2, uint256 floorA)
         internal
         view
         returns (Call[] memory calls, bytes32 authNonce)
@@ -218,20 +311,9 @@ contract CaliburMultiPairFlowScript is Script {
         uint256 validBefore = block.timestamp + 10 minutes;
         authNonce = bytes32(vm.randomUint());
         (uint8 v, bytes32 r, bytes32 s) = _signAuth(userPk, c, validBefore, authNonce);
-        calls = _buildBatch(c, routerCall, floor, validBefore, authNonce, v, r, s);
-    }
 
-    function _buildBatch(
-        Cfg memory c,
-        bytes memory routerCall,
-        uint256 floor,
-        uint256 validBefore,
-        bytes32 authNonce,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) internal pure returns (Call[] memory calls) {
-        calls = new Call[](5);
+        calls = new Call[](10);
+        // 1. gasless inbound: user -> executor
         calls[0] = Call({
             to: c.usdc,
             value: 0,
@@ -240,15 +322,42 @@ contract CaliburMultiPairFlowScript is Script {
                 (c.user, c.executor, c.amountIn, 0, validBefore, authNonce, v, r, s)
             )
         });
+        // 2. pre-fund the router
         calls[1] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.router, c.amountIn))});
-        calls[2] = Call({to: c.router, value: 0, data: routerCall});
-        calls[3] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, floor))});
+        // 3. router trip 1: the 4-pool swap chain ending in aaveWETH
+        calls[2] = Call({to: c.router, value: 0, data: trip1});
+        // 4. allow Aave to pull exactly the supplied amount
+        calls[3] = Call({to: c.aaveWeth, value: 0, data: abi.encodeCall(IERC20.approve, (c.aavePool, floorA))});
+        // 5. REAL Aave v3 supply (aTokens minted to the executor)
         calls[4] = Call({
+            to: c.aavePool,
+            value: 0,
+            data: abi.encodeCall(IAaveV3Pool.supply, (c.aaveWeth, floorA, c.executor, 0))
+        });
+        // 6. REAL Aave v3 withdraw of the WHOLE aToken balance, straight to the router
+        calls[5] = Call({
+            to: c.aavePool,
+            value: 0,
+            data: abi.encodeCall(IAaveV3Pool.withdraw, (c.aaveWeth, type(uint256).max, c.router))
+        });
+        // 7. router trip 2: swap back to USDC, pay the fee, sweep the rest
+        calls[6] = Call({to: c.router, value: 0, data: trip2});
+        // 8. approve max so depositERC20All can pull the dynamic balance
+        calls[7] =
+            Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, type(uint256).max))});
+        // 9. payout 2: deposit the executor's ENTIRE USDC balance — zero dust
+        calls[8] = Call({
             to: c.depository,
             value: 0,
-            data: abi.encodeCall(ILayerswapDepository.depositERC20, (c.depositId, c.usdc, c.receiver, floor))
+            data: abi.encodeCall(ILayerswapDepository.depositERC20All, (c.depositId, c.usdc, c.receiver))
         });
+        // 10. hygiene: drop the standing allowance
+        calls[9] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, 0))});
     }
+
+    // -------------------------------------------------------------------------
+    // Off-chain pricing
+    // -------------------------------------------------------------------------
 
     function _quote(address quoter, address tokenIn, address tokenOut, uint256 amountIn, uint24 fee)
         internal
@@ -268,6 +377,10 @@ contract CaliburMultiPairFlowScript is Script {
         return (amount * (10_000 - slippageBps)) / 10_000;
     }
 
+    // -------------------------------------------------------------------------
+    // EIP-3009 signing (payer key)
+    // -------------------------------------------------------------------------
+
     function _signAuth(uint256 userPk, Cfg memory c, uint256 validBefore, bytes32 authNonce)
         internal
         view
@@ -283,39 +396,51 @@ contract CaliburMultiPairFlowScript is Script {
         (v, r, s) = vm.sign(userPk, digest);
     }
 
-    function _logPlan(Cfg memory c, uint256 minWeth, uint256 minUni, uint256 minUsdcBack, uint256 floor)
-        internal
-        pure
-    {
+    // -------------------------------------------------------------------------
+    // Logging
+    // -------------------------------------------------------------------------
+
+    function _logPlan(Cfg memory c, Mins memory m) internal pure {
         console2.log("==================================================");
-        console2.log("Calibur multi-pair gasless DeFi flow (Sepolia)");
+        console2.log("Calibur multi-pair + REAL Aave v3 gasless flow (Sepolia, zero dust)");
         console2.log("--------------------------------------------------");
         console2.log("ROLES (three distinct EOAs):");
         console2.log("  payer (user):", c.user);
         console2.log("  relayer/executor:", c.executor);
         console2.log("  fee recipient:", c.feeRecipient);
         console2.log("--------------------------------------------------");
-        console2.log("STAGE 1  gasless inbound: receiveWithAuthorization(user -> executor), amountIn:", c.amountIn);
+        console2.log("STAGE 1  gasless inbound (EIP-3009), amountIn:", c.amountIn);
         console2.log("STAGE 2  USDC.transfer(universalRouter, amountIn)");
-        console2.log("STAGE 3  UniversalRouter.execute() -- 3 different pairs:");
-        console2.log("  hop 1: USDC -> WETH  minOut:", minWeth);
-        console2.log("  hop 2: WETH -> UNI   minOut:", minUni);
-        console2.log("  hop 3: UNI  -> USDC  minOut:", minUsdcBack);
-        console2.log("  fee   -> feeRecipient:", c.feeAmount);
-        console2.log("  sweep -> executor (min):", floor);
-        console2.log("STAGE 4  USDC.approve(depository, floor)");
-        console2.log("STAGE 5  LayerswapDepository.depositERC20(floor):", floor);
+        console2.log("STAGE 3  router trip 1 -- 4 swaps, 4 pools:");
+        console2.log("  hop 1: USDC -> WETH      minOut:", m.weth1);
+        console2.log("  hop 2: WETH -> UNI       minOut:", m.uni);
+        console2.log("  hop 3: UNI  -> WETH      minOut:", m.weth2);
+        console2.log("  hop 4: WETH -> aaveWETH  minOut:", m.floorA);
+        console2.log("  TRANSFER floorA aaveWETH -> executor (excess stays in router for trip 2)");
+        console2.log("STAGE 4  aaveWETH.approve(aavePool, floorA)");
+        console2.log("STAGE 5  AavePool.supply(aaveWETH, floorA, executor)   << REAL AAVE");
+        console2.log("STAGE 6  AavePool.withdraw(aaveWETH, MAX, router)      << REAL AAVE");
+        console2.log("STAGE 7  router trip 2 -- 2 swaps + payouts:");
+        console2.log("  aaveWETH -> WETH         minOut:", m.wethBack);
+        console2.log("  WETH -> USDC             minOut:", m.usdcFinal);
+        console2.log("  TRANSFER fee -> feeRecipient:", c.feeAmount);
+        console2.log("  SWEEP ALL USDC -> executor, min:", m.sweepFloor);
+        console2.log("STAGE 8  USDC.approve(depository, max)");
+        console2.log("STAGE 9  depositERC20All -- executor's WHOLE balance (zero dust)");
+        console2.log("STAGE 10 USDC.approve(depository, 0)");
         console2.log("--------------------------------------------------");
     }
 
-    function _logSummary(Cfg memory c, bytes32 authNonce) internal pure {
+    function _logSummary(Cfg memory c, Mins memory m, bytes32 authNonce) internal pure {
         console2.log("--------------------------------------------------");
         console2.log("Batch submitted by relayer (pays all gas).");
-        console2.log("  token path: USDC -> WETH -> UNI -> USDC");
-        console2.log("  USDC:", c.usdc);
-        console2.log("  WETH:", c.weth);
-        console2.log("  UNI :", c.uni);
+        console2.log("  token path: USDC -> WETH -> UNI -> WETH -> aaveWETH -> (Aave) -> aaveWETH -> WETH -> USDC");
+        console2.log("  USDC (Circle):", c.usdc);
+        console2.log("  aaveWETH (Aave faucet):", c.aaveWeth);
+        console2.log("  Aave v3 pool:", c.aavePool);
+        console2.log("  layerswap depository (ours, depositERC20All):", c.depository);
         console2.log("  layerswap receiver:", c.receiver);
+        console2.log("  guaranteed minimum deposited (floor):", m.sweepFloor);
         console2.log("  auth nonce:");
         console2.logBytes32(authNonce);
         console2.log("  deposit id:");
