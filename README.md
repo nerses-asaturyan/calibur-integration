@@ -192,6 +192,7 @@ script/ApproveDepository.s.sol       # optional one-time approve → enables 2-c
 script/CaliburDeposit.s.sol          # signs + builds + submits the batch via Calibur.execute
 script/CaliburRouterFlow.s.sol       # TX 1: 4 Uniswap pools + ETH round-trip + zero-dust deposit
 script/CaliburMultiPairFlow.s.sol    # TX 2: 3 EOAs + REAL Aave v3 supply/withdraw + 6 swaps, zero dust
+script/CaliburNativeDualFlow.s.sol   # TX 3: 3 swaps -> native ETH split to two EOAs, no depository
 script/SignReceiveAuthorization.s.sol# optional: sign out-of-band, prints v/r/s
 test/CaliburDepositLocal.t.sol       # deterministic full-flow + atomicity
 test/CaliburDepositSepoliaFork.t.sol # live Sepolia: real USDC + our live depository
@@ -213,6 +214,7 @@ Universal Router, Aave v3).
 |---|---|---|---|
 | **TX 1** — 4 Uniswap pools + native ETH round-trip, zero dust | [`0x95378e76…4bff63b`](https://sepolia.etherscan.io/tx/0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b) | 11341683 | 519,836 |
 | **TX 2** — 3 EOAs + **real Aave v3 supply/withdraw** + 6 swaps, zero dust | [`0x20c49f67…645d4b6`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 11341687 | 823,647 |
+| **TX 3** — **native ETH** split to two EOAs, no depository, zero dust | [`0xa50e86d8…cb2e4c9`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 11341930 | 374,091 |
 
 *(The earlier floor-based v1 runs — `0x74fb71b5…` and `0xbf22f0ad…` — used the
 original depository and left 198/297 units of dust; kept here only for history.)*
@@ -332,6 +334,42 @@ in every token**: the executor ends at 0 USDC and 0 aaveWETH, and the router's
 aaveWETH excess was consumed to the last unit (232851084895 + 9551631866 =
 242402716761). Three distinct EOAs, the aToken mint/burn, and the `Deposited`
 event are all visible in the explorer logs.
+
+## TX 3 — native ETH to two EOAs, no depository
+
+Script: `script/CaliburNativeDualFlow.s.sol`. Input: **10000** USDC units (0.01 USDC).
+Roles: payer `0x719b…BD0d`; relayer/executor `0xF651…778D`; payout EOA 1 (fee, 10%)
+`0x0e86…F001`; payout EOA 2 (remainder) = **the payer itself**.
+
+The 3-call Calibur batch:
+
+| # | Call |
+|---|---|
+| 1 | `USDC.receiveWithAuthorization(user → executor)` — gasless inbound |
+| 2 | `USDC.transfer(router, 10000)` — pre-fund |
+| 3 | `UniversalRouter.execute(...)` — 3 swaps + `UNWRAP_WETH` + `PAY_PORTION` + `SWEEP` |
+
+The on-chain trace (all swap legs on `CONTRACT_BALANCE`):
+
+```
+payer    -> executor        : 10000 USDC          (gasless EIP-3009)
+executor -> router          : 10000 USDC          (pre-fund)
+router   -> USDC/WETH 0.30% : 10000 USDC          -> 437801048471 WETH
+router   -> WETH/UNI  0.30% : 437801048471 WETH   -> 19812420095 UNI
+router   -> UNI/WETH  0.05% : 19812420095 UNI     -> 434777872691 WETH
+router   UNWRAP_WETH        : 434777872691 WETH   -> 434777872691 native ETH
+router   -> payout EOA 1    : 43477787269 wei     (PAY_PORTION, exactly 10%)
+router   -> payout EOA 2    : 391300085422 wei    (SWEEP: everything left)
+```
+
+`PAY_PORTION` and `SWEEP` are the Universal Router's own payment commands — one
+takes a bps share of the router's live balance, the other takes everything that
+remains — so **both payouts are native ETH straight from the router** and the
+executor never holds the output (it ends this tx at 0 USDC/WETH/UNI, the router
+at 0 everything). And because payout EOA 2 defaults to the payer, the user
+literally **buys gas with USDC by signature**: their ETH balance went from
+26186877570000 to 26578177655422 wei (+391300085422) while sending no
+transaction and paying nothing.
 
 ## Run them yourself
 
