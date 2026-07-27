@@ -29,6 +29,14 @@ The deposit tail shrinks from three calls (`approve(max)` → `depositERC20All`
 → `approve(0)`) to **one** (`forwarder.executeWithBalance(...)`), and the
 swap's recipient becomes the forwarder.
 
+## The flows re-proven here
+
+The **1st and 4th** diagrams (the two ending in the Depository) are the flows
+this experiment retargets — same shapes as the main branch, but the Depository
+is the untouched original and the dynamic-amount bridge is the forwarder:
+
+![The four flows; this experiment re-proves #1 (user → uniswap → depository) and #4 (user → fee EOA + uniswap → depository) against the ORIGINAL depository via BalanceForwarder](docs/flow-diagrams.jpg)
+
 ## The six proven transactions (original depository, full dynamic output)
 
 | Cell | tx | gas | vs extended-depository baseline |
