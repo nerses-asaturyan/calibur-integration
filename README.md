@@ -23,6 +23,7 @@ produce is deposited, exactly.
 | Calibur singleton (7702 target) | `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00` |
 | **LayerswapDepository (ours, verified, `depositERC20All`)** | [`0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8`](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code) |
 | LayerswapDepository (original, no `depositERC20All`) | `0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4` |
+| **PayoutSplitter (ours, verified, stateless N-way splitter)** | [`0xd952dc9C32FBC747232E888034280887B15591D3`](https://sepolia.etherscan.io/address/0xd952dc9C32FBC747232E888034280887B15591D3#code) |
 | Uniswap Universal Router | `0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b` |
 | Uniswap QuoterV2 (off-chain pricing) | `0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3` |
 | WETH9 (canonical) | `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
@@ -186,10 +187,12 @@ following. The first group prevents **theft/abuse**; the second prevents
 
 ```
 src/LayerswapDepository.sol          # our deployment: original contract + depositERC20All (whole-balance deposit)
+src/PayoutSplitter.sol               # stateless N-way % splitter + generic call hooks (ERC-20 & native), zero dust
 src/CaliburDepositBatch.sol          # pure lib: builds the 3-call batch (inlined, not deployed)
 src/interfaces/*                     # IERC3009USDC, ILayerswapDepository, IERC7821(+Call), IERC20,
-                                     #   IUniversalRouter, IQuoterV2, IAaveV3Pool
+                                     #   IUniversalRouter, IQuoterV2, IAaveV3Pool, IPayoutSplitter(+Leg)
 script/DeployDepository.s.sol        # deploys + whitelists src/LayerswapDepository.sol
+script/DeploySplitter.s.sol          # deploys src/PayoutSplitter.sol (no args, no owner)
 script/EnableDelegation.s.sol        # EIP-7702 enable (executor → Calibur impl)
 script/DisableDelegation.s.sol       # EIP-7702 disable (→ plain EOA)
 script/ApproveDepository.s.sol       # optional one-time approve → enables 2-call batch
@@ -197,9 +200,12 @@ script/CaliburDeposit.s.sol          # signs + builds + submits the batch via Ca
 script/CaliburRouterFlow.s.sol       # TX 1: 4 Uniswap pools + ETH round-trip + zero-dust deposit
 script/CaliburMultiPairFlow.s.sol    # TX 2: 3 EOAs + REAL Aave v3 supply/withdraw + 6 swaps, zero dust
 script/CaliburNativeDualFlow.s.sol   # TX 3: 3 swaps -> native ETH split to two EOAs, no depository
+script/CaliburSplitFlow.s.sol        # TX 4: arbitrary-% splits (ERC-20 + native) + ORIGINAL depository hooks
 script/SignReceiveAuthorization.s.sol# optional: sign out-of-band, prints v/r/s
 test/CaliburDepositLocal.t.sol       # deterministic full-flow + atomicity
+test/PayoutSplitter.t.sol            # splitter units: bps math, hooks, reverts, atomicity, reentrancy
 test/CaliburDepositSepoliaFork.t.sol # live Sepolia: real USDC + our live depository
+test/PayoutSplitterSepoliaFork.t.sol # live Sepolia: splitter + real USDC + ORIGINAL depository
 ```
 
 ---
@@ -219,6 +225,7 @@ Universal Router, Aave v3).
 | **TX 1** — 4 Uniswap pools + native ETH round-trip, zero dust | [`0x95378e76…4bff63b`](https://sepolia.etherscan.io/tx/0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b) | 11341683 | 519,836 |
 | **TX 2** — 3 EOAs + **real Aave v3 supply/withdraw** + 6 swaps, zero dust | [`0x20c49f67…645d4b6`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 11341687 | 823,647 |
 | **TX 3** — **native ETH** split to two EOAs, no depository, zero dust | [`0xa50e86d8…cb2e4c9`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 11341930 | 374,091 |
+| **TX 4** — **generic splitter**: arbitrary % (12.34/37.66/50), ERC-20 **and** native, ORIGINAL depository via call hooks | [`0xf3fe4ee3…894c76`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 11361201 | 527,556 |
 
 *(The earlier floor-based v1 runs — `0x74fb71b5…` and `0xbf22f0ad…` — used the
 original depository and left 198/297 units of dust; kept here only for history.)*
@@ -374,6 +381,46 @@ at 0 everything). And because payout EOA 2 defaults to the payer, the user
 literally **buys gas with USDC by signature**: their ETH balance went from
 26186877570000 to 26578177655422 wei (+391300085422) while sending no
 transaction and paying nothing.
+
+## TX 4 — the generic PayoutSplitter: any %, any destination, ERC-20 and native
+
+Script: `script/CaliburSplitFlow.s.sol`. Contract:
+[`PayoutSplitter`](https://sepolia.etherscan.io/address/0xd952dc9C32FBC747232E888034280887B15591D3#code)
+(`0xd952…91D3`, verified) — **stateless & permissionless** (router-like trust
+model: it splits its own live balance and must end every tx empty; a terminal
+`DustLeft` check enforces it). Legs are `(target, shareBps, amountOffset, data)`:
+empty `data` = plain transfer; non-empty = **generic call hook** with the
+run-time amount substituted into the calldata at `amountOffset`. Shares must sum
+to exactly 10000 and the **last leg takes the arithmetic remainder** — zero dust
+by construction, at any percentages.
+
+This tx proves everything at once — arbitrary non-round shares
+(**12.34% / 37.66% / 50%**), an ERC-20 split AND a native-ETH split, and the
+**ORIGINAL unextended depository** (`0xbc51…D0b4`, no `depositERC20All`) fed a
+fully dynamic amount via hooks:
+
+| # | Call |
+|---|---|
+| 1 | `USDC.receiveWithAuthorization(user → executor)` — gasless inbound |
+| 2 | `USDC.transfer(router, 10000)` — pre-fund |
+| 3 | `UniversalRouter.execute(...)` — 3 swaps, then `PAY_PORTION` 50% of the WETH → splitter (ERC-20 half) + `UNWRAP_WETH` the rest → splitter (native half) |
+| 4 | `splitter.split(WETH, …)` — 12.34% → EOA-A, 37.66% → payer, remainder → `depositERC20` **hook** (amount patched at offset 100) |
+| 5 | `splitter.split(ETH, …)` — same shares, remainder → `depositNative` **hook** (amount = msg.value) |
+
+On-chain result (WETH half 204094252081, native half 204094252082):
+
+```
+split(WETH): 25185230706 -> EOA-A        (exactly 12.34%)
+             76861895333 -> payer        (exactly 37.66%)
+            102047126042 -> ORIGINAL depository depositERC20 -> Deposited(WETH)
+split(ETH):  25185230706 -> EOA-A
+             76861895334 -> payer
+            102047126042 -> ORIGINAL depository depositNative -> Deposited(native)
+```
+
+Both `Deposited` events came from the **original** depository — the call hook
+(not a contract extension) is what made the dynamic amount possible. Splitter
+and router end at 0 in ETH/USDC/WETH/UNI: zero dust, enforced on-chain.
 
 ## Run them yourself
 

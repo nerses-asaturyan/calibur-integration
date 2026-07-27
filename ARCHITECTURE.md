@@ -73,6 +73,7 @@ Trust facts:
 | Layerswap depository | `approve(max)` → `depositERC20All` → `approve(0)` | **0** | **proven** (TX 1, TX 2) |
 | Two+ EOAs, ERC-20 | router `TRANSFER` (exact) / `PAY_PORTION` (bips) / `SWEEP` (rest) | 0 | proven pattern (fee legs of TX 1–2) |
 | Two+ EOAs, **native ETH** | `UNWRAP_WETH` → `PAY_PORTION` + `SWEEP` with token = `address(0)` | **0** | **proven** (TX 3 — payer received gas money gaslessly) |
+| **N-way arbitrary-% split** — EOAs + any contract (incl. the **original** depository), ERC-20 **and** native | `PayoutSplitter.split`: last-leg remainder + calldata amount substitution (call hooks) | **0** (enforced by terminal `DustLeft` check) | **proven** (TX 4 — 12.34/37.66/50 in WETH and ETH, `depositERC20`/`depositNative` hooks) |
 
 ## 4. The proven transactions (Sepolia)
 
@@ -81,6 +82,7 @@ Trust facts:
 | 1 | 4 pools + ETH round-trip → zero-dust depository deposit | [`0x95378e76…`](https://sepolia.etherscan.io/tx/0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b) | 519,836 |
 | 2 | 3 EOAs + **real Aave v3** + 6 swaps → zero-dust deposit | [`0x20c49f67…`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 823,647 |
 | 3 | Native-ETH dual-EOA payout, no depository, 3-call batch | [`0xa50e86d8…`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 374,091 |
+| 4 | Generic splitter: arbitrary % (12.34/37.66/50), ERC-20 + native, ORIGINAL depository via hooks | [`0xf3fe4ee3…`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 527,556 |
 | 0 | Base flow: plain USDC → depository (no DeFi) | see README §2 | ~130k |
 
 Infrastructure: our verified depository
@@ -96,7 +98,9 @@ Calibur singleton `0x0000…8f00`; Universal Router `0x3A9D…F98b`; Aave v3 poo
 3. **`CONTRACT_BALANCE` sentinel** — each router leg consumes the previous
    leg's full output; no intermediate amount needed at sign time.
 4. **Dynamic-amount exits** — `SWEEP`/`PAY_PORTION` (router), `withdraw(MAX)`
-   (Aave), `depositERC20All` (ours): every terminal leg reads balances at run
+   (Aave), `depositERC20All` (ours), and `PayoutSplitter.split` (ours: bps
+   shares of the live balance, last leg = arithmetic remainder, call hooks with
+   run-time amount substitution): every terminal leg reads balances at run
    time → zero dust by construction.
 5. **Off-chain pricing, on-chain floors** — QuoterV2 quotes each hop from the
    previous hop's *minimum*; unquotable legs (one-sided bridge pools) get
@@ -110,6 +114,10 @@ Calibur singleton `0x0000…8f00`; Universal Router `0x3A9D…F98b`; Aave v3 poo
   `CaliburMultiPairFlow` (+ Aave sandwich), zero dust via `depositERC20All`.
 - **USDC → DeFi chain → people/EOAs (incl. native ETH)** →
   `CaliburNativeDualFlow`, 3-call batch, router pays everyone directly.
+- **Arbitrary-% payouts to any mix of EOAs and contracts (incl. the original
+  depository), ERC-20 or native** → `CaliburSplitFlow` with `PayoutSplitter`
+  (stateless; verified at `0xd952…91D3`); the router's `PAY_PORTION` only takes
+  bips of its own balance, the splitter generalizes that to N legs + call hooks.
 - **Non-USDC inbound** → add a Permit2/EIP-2612 leg in place of the EIP-3009
   call; everything downstream is unchanged.
 - **Native inbound / "user has only ETH"** → not gasless under this
