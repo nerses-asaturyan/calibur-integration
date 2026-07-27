@@ -5,6 +5,10 @@ A user signs **one** EIP-3009 `receiveWithAuthorization`; a Calibur smart accoun
 USDC and forwards it into the LayerswapDepository. If any step reverts, nothing
 moves and the signature's nonce stays unused.
 
+> **[ARCHITECTURE.md](ARCHITECTURE.md)** — the final architecture: design
+> principles, roles & trust model, full capability matrix (what's gasless, what
+> isn't, and why), all proven transactions, and the decision guide.
+
 The repo now ships **our own `LayerswapDepository` deployment** (same contract,
 plus a `depositERC20All` function that forwards the caller's **whole balance**,
 read at run time). That one dynamic-amount primitive turns the demo flows from
