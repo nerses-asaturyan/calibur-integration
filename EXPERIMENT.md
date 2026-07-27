@@ -50,6 +50,138 @@ swaps and delivers to an address (that's the entire venue contract surface —
 - Flow 3's split is **live-exact bips of the actual output** — computed by SF
   on its real balance, venue-agnostic.
 
+## Execution shapes, cell by cell
+
+`X` = the user's input; `▸amount◂` = patched into the calldata by SF at run
+time; hooks marked with `→` carry the leg's amount (calldata patch for ERC-20,
+`msg.value` for native).
+
+### Flow 1 — all in → swap → deposit full output
+
+**gasless** (relayer's Calibur batch; user signed EIP-3009 only):
+```
+Calibur batch: [
+  USDC.receiveWithAuthorization(user → executor, X),
+  USDC.transfer(router, X),
+  router.execute( swap USDC→WETH, recipient = SF ),
+  SF.run([ { WETH, [ 100% hook → depositERC20(id, WETH, receiver, ▸amount◂) ] } ])
+]
+```
+**user-erc20** (one Multicall3 tx from the user):
+```
+Multicall3: [
+  USDC.permit(user, MC3, X)  (allowFailure = true),
+  USDC.transferFrom(user → router, X),
+  router.execute( swap → SF ),
+  SF.run([ { WETH, [ 100% hook → depositERC20(…, ▸amount◂) ] } ])
+]
+```
+**user-eth** (ONE direct SF call):
+```
+SF.run{value: X}([
+  split[0] = { native, [ 100% hook → router.execute{value}(WRAP_ETH, swap → SF) ] },
+  split[1] = { USDC,   [ 100% hook → depositERC20(id, USDC, receiver, ▸amount◂) ] }
+])
+```
+
+### Flow 2 — SF splits input (exact fee); venue delivers to user
+
+**gasless**:
+```
+Calibur batch: [
+  USDC.receiveWithAuthorization(user → executor, X),
+  USDC.transfer(SF, X),
+  SF.run([ { USDC, [ 12.34% → feeEOA, remainder → router ] } ]),
+  router.execute( swap CONTRACT_BALANCE → recipient = user )
+]
+```
+**user-erc20**:
+```
+Multicall3: [
+  USDC.permit(user, MC3, X)  (allowFailure = true),
+  USDC.transferFrom(user → SF, X),
+  SF.run([ { USDC, [ 12.34% → feeEOA, remainder → router ] } ]),
+  router.execute( swap → user )
+]
+```
+**user-eth** (ONE direct SF call — the remainder leg IS the swap):
+```
+SF.run{value: X}([
+  { native, [ 12.34% → feeEOA,
+              remainder hook → router.execute{value}(WRAP_ETH, swap → user) ] }
+])
+```
+
+### Flow 3 — swap all → SF splits the ACTUAL output
+
+**gasless**:
+```
+Calibur batch: [
+  USDC.receiveWithAuthorization(user → executor, X),
+  USDC.transfer(router, X),
+  router.execute( swap USDC→WETH, recipient = SF ),
+  SF.run([ { WETH, [ 12.34% → feeEOA, remainder → user ] } ])   // live-exact bips
+]
+```
+**user-erc20**:
+```
+Multicall3: [
+  USDC.permit(user, MC3, X)  (allowFailure = true),
+  USDC.transferFrom(user → router, X),
+  router.execute( swap → SF ),
+  SF.run([ { WETH, [ 12.34% → feeEOA, remainder → user ] } ])
+]
+```
+**user-eth** (ONE direct SF call — split[0]'s hook produces split[1]'s balance):
+```
+SF.run{value: X}([
+  split[0] = { native, [ 100% hook → router.execute{value}(WRAP_ETH, swap → SF) ] },
+  split[1] = { USDC,   [ 12.34% → feeEOA, remainder → user ] }
+])
+```
+
+### Flow 4 — SF splits input (fee); venue swaps rest → SF deposits full output
+
+**gasless**:
+```
+Calibur batch: [
+  USDC.receiveWithAuthorization(user → executor, X),
+  USDC.transfer(SF, X),
+  SF.run([ { USDC, [ 12.34% → feeEOA, remainder → router ] } ]),
+  router.execute( swap → SF ),
+  SF.run([ { WETH, [ 100% hook → depositERC20(…, ▸amount◂) ] } ])
+]
+```
+**user-erc20**:
+```
+Multicall3: [
+  USDC.permit(user, MC3, X)  (allowFailure = true),
+  USDC.transferFrom(user → SF, X),
+  SF.run([ { USDC, [ 12.34% → feeEOA, remainder → router ] } ]),
+  router.execute( swap → SF ),
+  SF.run([ { WETH, [ 100% hook → depositERC20(…, ▸amount◂) ] } ])
+]
+```
+**user-eth** (ONE direct SF call):
+```
+SF.run{value: X}([
+  { native, [ 12.34% → feeEOA,
+              remainder hook → router.execute{value}(WRAP_ETH, swap → SF) ] },
+  { USDC,   [ 100% hook → depositERC20(id, USDC, receiver, ▸amount◂) ] }
+])
+```
+
+### Native deposit demo — dynamic msg.value into depositNative
+
+```
+Calibur batch: [
+  USDC.receiveWithAuthorization(user → executor, X),
+  USDC.transfer(router, X),
+  router.execute( swap USDC→WETH → router, UNWRAP_WETH → native ETH → SF ),
+  SF.run([ { native, [ 100% hook → depositNative{value: ▸amount◂}(id, receiver) ] } ])
+]
+```
+
 ## The 13 proven transactions (original depository `0xbc51…D0b4`)
 
 | Flow | gasless | user-erc20 (Multicall3+permit) | user-eth (direct SF call) |
