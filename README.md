@@ -1,4 +1,4 @@
-# Bransfer flows — gasless & user-sent DeFi deposits (Sepolia PoC)
+# Gasless & user-sent DeFi deposit flows (Sepolia PoC)
 
 Four payment flows × three funding modes = **12 proven on-chain transactions**
 (+1 bonus), all sharing the same guarantees:
