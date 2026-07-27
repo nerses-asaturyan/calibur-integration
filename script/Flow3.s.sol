@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
 
-import {FlowBase, Call, IERC20, IPermit2, console2} from "./FlowBase.s.sol";
+import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
 
-/// @title Flow3 — user → uniswap → [value to USER + fee → EOA]
-///        (swap FIRST: the fee is a LIVE-EXACT bips share of the ACTUAL output
-///        via PAY_PORTION; SWEEP sends every remaining wei to the user)
+/// @title Flow3 — user → swap venue → SplitForwarder splits the OUTPUT:
+///        [value to USER + fee → EOA]
+///
+/// VENUE-INDEPENDENT: this is the flow that previously depended on the
+/// Universal Router's own PAY_PORTION/SWEEP payment commands. The split now
+/// happens in SF.run on the ACTUAL output balance — live-exact bips, remainder
+/// to the user — so any venue that can deliver output to an address (0x
+/// Settler included) plugs in unchanged.
 ///
 ///   FUNDING_MODE=gasless     relayer Calibur batch; user signs EIP-3009 only
-///   FUNDING_MODE=user-erc20  ONE user tx, ROUTER-ONLY (PERMIT2_PERMIT) —
-///                            public-mempool-safe
-///   FUNDING_MODE=user-eth    ONE user tx, ROUTER-ONLY
-///
-/// No depository leg -> no Multicall3 anywhere in this flow.
-///
-/// Usage:
-///   FUNDING_MODE=user-eth forge script script/Flow3.s.sol:Flow3Script \
-///     --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
+///   FUNDING_MODE=user-erc20  ONE user tx: Multicall3 + in-batch EIP-2612 permit
+///                            (mainnet: MEV-protected submission REQUIRED —
+///                            note this replaced the router-only shape when the
+///                            split moved out of the venue)
+///   FUNDING_MODE=user-eth    ONE user tx, DIRECTLY to SplitForwarder.run{value}
 contract Flow3Script is FlowBase {
     function run() external {
         (Cfg memory c, uint256 broadcasterPk, uint256 userPk) = _loadCfg();
-        _logHeader(c, "Flow 3: swap all -> live-exact split: user + fee EOA");
+        _logHeader(c, "Flow 3: swap all -> SF splits ACTUAL output: user + fee EOA");
         _preflight(c, false);
 
         if (_is(c.mode, MODE_GASLESS)) {
@@ -33,60 +34,59 @@ contract Flow3Script is FlowBase {
         _logDone(c);
     }
 
-    /// @dev PAY_PORTION takes feeBps of the router's LIVE output balance (exact
-    ///      2-way split of the actual amount); SWEEP pays the user everything
-    ///      left, min-guarded by the quoted floor net of the fee share.
-    function _tailInputs(Cfg memory c, address out, address userRecipient, uint256 minOut)
-        internal
-        pure
-        returns (bytes memory feeInput, bytes memory sweepInput)
-    {
-        feeInput = abi.encode(out, c.feeRecipient, c.feeBps);
-        sweepInput = abi.encode(out, userRecipient, minOut * (10_000 - c.feeBps) / 10_000);
+    /// @dev Output split: fee bips -> EOA, remainder -> user. Computed on SF's
+    ///      LIVE balance of the output token — live-exact, any venue.
+    function _outSplit(Cfg memory c, address outToken) internal view returns (TokenSplit[] memory) {
+        return _single(
+            outToken,
+            _legs2(_plainLeg(c.feeRecipient, uint96(c.feeBps)), _plainLeg(c.user, uint96(10_000 - c.feeBps)))
+        );
     }
 
     function _gasless(Cfg memory c, uint256 relayerPk, uint256 userPk) internal {
         uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, c.amountIn));
         console2.log("  swap exact-in:", c.amountIn, " minOut:", minOut);
 
-        bytes memory commands = abi.encodePacked(V3_SWAP_EXACT_IN, PAY_PORTION, SWEEP);
-        bytes[] memory inputs = new bytes[](3);
-        inputs[0] = _swapInput(ADDRESS_THIS, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
-        (inputs[1], inputs[2]) = _tailInputs(c, c.weth, c.user, minOut);
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
 
-        Call[] memory calls = new Call[](3);
+        Call[] memory calls = new Call[](4);
         calls[0] = _pull3009(c, userPk, c.amountIn);
         calls[1] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.router, c.amountIn))});
-        calls[2] = Call({to: c.router, value: 0, data: _routerCall(commands, inputs)});
+        calls[2] = Call({to: c.router, value: 0, data: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)});
+        calls[3] = _sfRunCall(c, _outSplit(c, c.weth));
 
         _submitCalibur(c, relayerPk, calls);
     }
 
     function _userErc20(Cfg memory c, uint256 userPk) internal {
-        uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, c.amountIn));
-        (IPermit2.PermitSingle memory single, bytes memory sig) =
-            _signPermit2Single(c, userPk, c.usdc, uint160(c.amountIn), block.timestamp + 10 minutes);
-        console2.log("  swap exact-in:", c.amountIn, " minOut:", minOut);
+        console2.log("  swap exact-in:", c.amountIn);
+        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](4);
+        calls[0] = _permitLegMc3(c, userPk, c.amountIn);
+        calls[1] = _transferFromLegMc3(c, c.router, c.amountIn);
+        calls[2] = _swapToMc3LegErc20(c, c.amountIn);
+        calls[3] = _sfRunMc3(c, _outSplit(c, c.weth));
 
-        bytes memory commands = abi.encodePacked(PERMIT2_PERMIT, V3_SWAP_EXACT_IN, PAY_PORTION, SWEEP);
-        bytes[] memory inputs = new bytes[](4);
-        inputs[0] = _permit2PermitInput(single, sig);
-        inputs[1] = _swapInput(ADDRESS_THIS, c.amountIn, minOut, _path(c, c.usdc, c.weth), true); // pull from user
-        (inputs[2], inputs[3]) = _tailInputs(c, c.weth, MSG_SENDER, minOut);
-
-        _submitRouter(c, userPk, commands, inputs, 0);
+        _submitMc3(c, userPk, calls, 0);
     }
 
+    /// @dev ONE direct SF call: split 1 (native) = 100% router hook (wrap + swap
+    ///      -> SF); split 2 (USDC) = the live-exact output split.
     function _userEth(Cfg memory c, uint256 userPk) internal {
         uint256 minOut = _floor(c, _quote(c, c.weth, c.usdc, c.amountEth));
         console2.log("  wrap + swap exact-in (wei):", c.amountEth, " minOut:", minOut);
 
-        bytes memory commands = abi.encodePacked(WRAP_ETH, V3_SWAP_EXACT_IN, PAY_PORTION, SWEEP);
-        bytes[] memory inputs = new bytes[](4);
+        bytes[] memory inputs = new bytes[](2);
         inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE);
-        inputs[1] = _swapInput(ADDRESS_THIS, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
-        (inputs[2], inputs[3]) = _tailInputs(c, c.usdc, MSG_SENDER, minOut);
+        inputs[1] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
 
-        _submitRouter(c, userPk, commands, inputs, c.amountEth);
+        TokenSplit[] memory splits = new TokenSplit[](2);
+        splits[0] = TokenSplit({
+            token: NATIVE,
+            legs: _legs1(_routerHookLeg(c, 10_000, abi.encodePacked(WRAP_ETH, V3_SWAP_EXACT_IN), inputs))
+        });
+        splits[1] = _outSplit(c, c.usdc)[0];
+
+        _submitSfNative(c, userPk, splits, c.amountEth);
     }
 }

@@ -42,10 +42,15 @@ contract BonusPermit2FlowScript is FlowBase {
         Call[] memory calls = new Call[](3);
         calls[0] = Call({to: c.permit2, value: 0, data: _permit2PullData(c, amount, nonce, deadline, sig)});
         calls[1] = Call({to: c.router, value: 0, data: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)});
-        calls[2] = _forwardDepositCall(c, c.usdc);
+        calls[2] = _depositTailCall(c);
 
         _submitCalibur(c, relayerPk, calls);
         _logDone(c);
+    }
+
+    /// @dev Separate frame to keep run() clear of stack-too-deep.
+    function _depositTailCall(Cfg memory c) internal view returns (Call memory) {
+        return _sfRunCall(c, _single(c.usdc, _legs1(_depositLeg(c, c.usdc, 10_000))));
     }
 
     /// @dev Separate frame to keep run() clear of stack-too-deep.

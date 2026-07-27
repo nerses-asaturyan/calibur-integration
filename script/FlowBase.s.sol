@@ -13,7 +13,7 @@ import {IPermit2} from "../src/interfaces/IPermit2.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {IUniversalRouter} from "../src/interfaces/IUniversalRouter.sol";
 import {IQuoterV2} from "../src/interfaces/IQuoterV2.sol";
-import {BalanceForwarder} from "../src/BalanceForwarder.sol";
+import {SplitForwarder, Leg, TokenSplit} from "../src/SplitForwarder.sol";
 
 /// @title FlowBase
 /// @notice Shared machinery for the four flow scripts (Flow1..Flow4), each of
@@ -70,6 +70,7 @@ abstract contract FlowBase is Script {
     bytes1 internal constant PAY_PORTION = 0x06;
     bytes1 internal constant PERMIT2_PERMIT = 0x0a;
     bytes1 internal constant WRAP_ETH = 0x0b;
+    bytes1 internal constant UNWRAP_WETH = 0x0c;
 
     // --- Universal Router sentinels (Constants.sol) ---
     uint256 internal constant CONTRACT_BALANCE = 0x8000000000000000000000000000000000000000000000000000000000000000;
@@ -333,31 +334,85 @@ abstract contract FlowBase is Script {
     // depositERC20(bytes32 id, address token, address receiver, uint256 amount):
     // the amount word sits at byte offset 4 + 3*32 = 100 of the calldata template.
     uint256 internal constant DEPOSIT_ERC20_AMOUNT_OFFSET = 100;
+    uint256 internal constant NO_SUB = type(uint256).max;
 
-    /// @dev The deposit tail is now ONE call: the BalanceForwarder reads its own
-    ///      live balance (the router paid the swap output to it), patches the
-    ///      amount into the depositERC20 template, approves, calls the ORIGINAL
-    ///      depository, and enforces that it exits at 0.
-    function _forwardDepositData(Cfg memory c, address token) internal view returns (bytes memory) {
-        require(c.forwarder != address(0), "DEPOSIT_FORWARDER is zero");
-        bytes memory template =
-            abi.encodeCall(ILayerswapDepository.depositERC20, (c.depositId, token, c.receiver, 0));
-        return abi.encodeCall(
-            BalanceForwarder.executeWithBalance, (token, c.depository, DEPOSIT_ERC20_AMOUNT_OFFSET, template)
-        );
+    // --- SplitForwarder leg / split builders -------------------------------
+
+    function _plainLeg(address target, uint96 bps) internal pure returns (Leg memory) {
+        return Leg({target: target, shareBps: bps, amountOffset: NO_SUB, data: ""});
     }
 
-    function _forwardDepositCall(Cfg memory c, address token) internal view returns (Call memory) {
-        return Call({to: c.forwarder, value: 0, data: _forwardDepositData(c, token)});
-    }
-
-    function _forwardDepositMc3(Cfg memory c, address token) internal view returns (IMulticall3.Call3Value memory) {
-        return IMulticall3.Call3Value({
-            target: c.forwarder,
-            allowFailure: false,
-            value: 0,
-            callData: _forwardDepositData(c, token)
+    /// @dev Hook leg: depositERC20 on the ORIGINAL depository, amount patched
+    ///      at run time into offset 100.
+    function _depositLeg(Cfg memory c, address token, uint96 bps) internal view returns (Leg memory) {
+        return Leg({
+            target: c.depository,
+            shareBps: bps,
+            amountOffset: DEPOSIT_ERC20_AMOUNT_OFFSET,
+            data: abi.encodeCall(ILayerswapDepository.depositERC20, (c.depositId, token, c.receiver, 0))
         });
+    }
+
+    /// @dev Native hook leg: depositNative — the dynamic amount travels as
+    ///      msg.value, nothing to patch. (The capability the extended
+    ///      depository fundamentally cannot offer.)
+    function _depositNativeLeg(Cfg memory c, uint96 bps) internal view returns (Leg memory) {
+        return Leg({
+            target: c.depository,
+            shareBps: bps,
+            amountOffset: NO_SUB,
+            data: abi.encodeCall(ILayerswapDepository.depositNative, (c.depositId, c.receiver))
+        });
+    }
+
+    /// @dev Native hook leg carrying its amount as msg.value INTO a router
+    ///      execute() program (the UR rejects plain ETH sends; value must ride
+    ///      with the call). Lets a native split leg BE the swap step.
+    function _routerHookLeg(Cfg memory c, uint96 bps, bytes memory commands, bytes[] memory inputs)
+        internal
+        view
+        returns (Leg memory)
+    {
+        return Leg({target: c.router, shareBps: bps, amountOffset: NO_SUB, data: _routerCall(commands, inputs)});
+    }
+
+    function _single(address token, Leg[] memory legs) internal pure returns (TokenSplit[] memory splits) {
+        splits = new TokenSplit[](1);
+        splits[0] = TokenSplit({token: token, legs: legs});
+    }
+
+    function _legs1(Leg memory a) internal pure returns (Leg[] memory legs) {
+        legs = new Leg[](1);
+        legs[0] = a;
+    }
+
+    function _legs2(Leg memory a, Leg memory b) internal pure returns (Leg[] memory legs) {
+        legs = new Leg[](2);
+        (legs[0], legs[1]) = (a, b);
+    }
+
+    function _sfRunData(Cfg memory c, TokenSplit[] memory splits) internal pure returns (bytes memory) {
+        require(c.forwarder != address(0), "DEPOSIT_FORWARDER is zero");
+        return abi.encodeCall(SplitForwarder.run, (splits));
+    }
+
+    function _sfRunCall(Cfg memory c, TokenSplit[] memory splits) internal pure returns (Call memory) {
+        return Call({to: c.forwarder, value: 0, data: _sfRunData(c, splits)});
+    }
+
+    function _sfRunMc3(Cfg memory c, TokenSplit[] memory splits)
+        internal
+        pure
+        returns (IMulticall3.Call3Value memory)
+    {
+        return IMulticall3.Call3Value({target: c.forwarder, allowFailure: false, value: 0, callData: _sfRunData(c, splits)});
+    }
+
+    /// @dev user-eth flows submit ONE direct call: SplitForwarder.run{value}.
+    function _submitSfNative(Cfg memory c, uint256 userPk, TokenSplit[] memory splits, uint256 value) internal {
+        vm.startBroadcast(userPk);
+        SplitForwarder(payable(c.forwarder)).run{value: value}(splits);
+        vm.stopBroadcast();
     }
 
     /// @dev Encodes router.execute(commands, inputs, deadline).

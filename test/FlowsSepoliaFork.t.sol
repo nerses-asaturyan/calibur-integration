@@ -11,7 +11,8 @@ import {Flow4Script} from "../script/Flow4.s.sol";
 import {BonusPermit2FlowScript} from "../script/BonusPermit2Flow.s.sol";
 
 import {IERC20} from "../src/interfaces/IERC20.sol";
-import {BalanceForwarder} from "../src/BalanceForwarder.sol";
+import {SplitForwarder} from "../src/SplitForwarder.sol";
+import {NativeDepositDemoScript} from "../script/NativeDepositDemo.s.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {MockERC7821Executor} from "./mocks/MockERC7821Executor.sol";
@@ -43,7 +44,7 @@ contract FlowsSepoliaForkTest is Test {
     address internal feeEoa;
     address internal receiver;
     MockERC7821Executor internal executor;
-    BalanceForwarder internal forwarder;
+    SplitForwarder internal forwarder;
 
     bool internal forked;
 
@@ -61,7 +62,7 @@ contract FlowsSepoliaForkTest is Test {
         feeEoa = makeAddr("flowFeeEoa");
         receiver = makeAddr("flowReceiver");
         executor = new MockERC7821Executor();
-        forwarder = new BalanceForwarder();
+        forwarder = new SplitForwarder();
 
         // Whitelist our receiver on the live depository (we own it on the fork).
         vm.prank(ILayerswapDepository(DEPOSITORY).owner());
@@ -289,6 +290,20 @@ contract FlowsSepoliaForkTest is Test {
         f.run();
         assertEq(IERC20(WETH).balanceOf(user), 0, "user's WETH pulled by signature");
         assertGt(IERC20(USDC).balanceOf(receiver) - receiverBefore, 0, "receiver got FULL USDC output");
+        _assertNoDust();
+    }
+
+    // --------------------------------------------------------------------- //
+    //     Native deposit demo: dynamic msg.value into depositNative          //
+    // --------------------------------------------------------------------- //
+
+    function testFork_NativeDepositDemo_DynamicMsgValue() public onlyFork {
+        NativeDepositDemoScript f = new NativeDepositDemoScript();
+        f.setMode("gasless");
+        uint256 receiverBefore = receiver.balance;
+        f.run();
+        assertGt(receiver.balance - receiverBefore, 0, "receiver got NATIVE ETH via depositNative, dynamic amount");
+        assertEq(address(forwarder).balance, 0, "forwarder native dust");
         _assertNoDust();
     }
 
