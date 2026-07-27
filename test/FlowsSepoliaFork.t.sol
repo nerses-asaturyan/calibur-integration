@@ -11,6 +11,7 @@ import {Flow4Script} from "../script/Flow4.s.sol";
 import {BonusPermit2FlowScript} from "../script/BonusPermit2Flow.s.sol";
 
 import {IERC20} from "../src/interfaces/IERC20.sol";
+import {BalanceForwarder} from "../src/BalanceForwarder.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {MockERC7821Executor} from "./mocks/MockERC7821Executor.sol";
@@ -28,7 +29,8 @@ contract FlowsSepoliaForkTest is Test {
     address internal constant ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant MULTICALL3 = 0xcA11bde05977b3631167028862bE2a173976CA11;
-    address internal constant DEPOSITORY = 0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8;
+    // EXPERIMENT: the ORIGINAL depository (no depositERC20All) + BalanceForwarder.
+    address internal constant DEPOSITORY = 0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4;
 
     uint256 internal constant AMOUNT_IN = 10_000_000; // 10 USDC
     uint256 internal constant AMOUNT_ETH = 0.002 ether;
@@ -41,6 +43,7 @@ contract FlowsSepoliaForkTest is Test {
     address internal feeEoa;
     address internal receiver;
     MockERC7821Executor internal executor;
+    BalanceForwarder internal forwarder;
 
     bool internal forked;
 
@@ -58,6 +61,7 @@ contract FlowsSepoliaForkTest is Test {
         feeEoa = makeAddr("flowFeeEoa");
         receiver = makeAddr("flowReceiver");
         executor = new MockERC7821Executor();
+        forwarder = new BalanceForwarder();
 
         // Whitelist our receiver on the live depository (we own it on the fork).
         vm.prank(ILayerswapDepository(DEPOSITORY).owner());
@@ -74,6 +78,7 @@ contract FlowsSepoliaForkTest is Test {
         vm.setEnv("DEPOSIT_RECEIVER", vm.toString(receiver));
         vm.setEnv("FEE_RECIPIENT", vm.toString(feeEoa));
         vm.setEnv("CALIBUR_EXECUTOR", vm.toString(address(executor)));
+        vm.setEnv("DEPOSIT_FORWARDER", vm.toString(address(forwarder)));
         vm.setEnv("PRIVATE_KEY", vm.toString(bytes32(relayerPk)));
         vm.setEnv("USER_PRIVATE_KEY", vm.toString(bytes32(userPk)));
         vm.setEnv("AMOUNT_IN", vm.toString(AMOUNT_IN));
@@ -110,6 +115,8 @@ contract FlowsSepoliaForkTest is Test {
         assertEq(ROUTER.balance, 0, "router ETH dust");
         assertEq(IERC20(USDC).balanceOf(address(executor)), 0, "executor USDC dust");
         assertEq(IERC20(WETH).balanceOf(address(executor)), 0, "executor WETH dust");
+        assertEq(IERC20(USDC).balanceOf(address(forwarder)), 0, "forwarder USDC dust");
+        assertEq(IERC20(WETH).balanceOf(address(forwarder)), 0, "forwarder WETH dust");
     }
 
     function _mc3UsdcBefore() internal view returns (uint256) {
@@ -137,10 +144,8 @@ contract FlowsSepoliaForkTest is Test {
         f.run();
         assertEq(IERC20(USDC).balanceOf(user), 90_000_000, "user paid exactly 10 USDC");
         assertGt(IERC20(WETH).balanceOf(receiver) - receiverBefore, 0, "receiver got WETH via 2612+MC3");
-        // depositERC20All drains Multicall3's WHOLE balance — including any
-        // stranded tokens strangers left in the public contract; they ride
-        // along into the deposit (documented side effect, receiver gains).
-        assertEq(IERC20(WETH).balanceOf(MULTICALL3), 0, "MC3 fully drained");
+        // The forwarder (not Multicall3) collects the output now; strangers'
+        // stranded MC3 tokens no longer ride into deposits.
         _assertNoDust();
     }
 

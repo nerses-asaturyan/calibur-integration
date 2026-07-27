@@ -37,13 +37,12 @@ contract BonusPermit2FlowScript is FlowBase {
         bytes memory sig = _signPermit2Transfer(c, userPk, c.weth, amount, nonce, deadline);
 
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = _swapInput(c.executor, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
 
-        Call[] memory tail = _depositAllTailCalls(c, c.usdc);
-        Call[] memory calls = new Call[](5);
+        Call[] memory calls = new Call[](3);
         calls[0] = Call({to: c.permit2, value: 0, data: _permit2PullData(c, amount, nonce, deadline, sig)});
         calls[1] = Call({to: c.router, value: 0, data: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)});
-        (calls[2], calls[3], calls[4]) = (tail[0], tail[1], tail[2]);
+        calls[2] = _forwardDepositCall(c, c.usdc);
 
         _submitCalibur(c, relayerPk, calls);
         _logDone(c);

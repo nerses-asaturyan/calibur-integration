@@ -13,6 +13,7 @@ import {IPermit2} from "../src/interfaces/IPermit2.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
 import {IUniversalRouter} from "../src/interfaces/IUniversalRouter.sol";
 import {IQuoterV2} from "../src/interfaces/IQuoterV2.sol";
+import {BalanceForwarder} from "../src/BalanceForwarder.sol";
 
 /// @title FlowBase
 /// @notice Shared machinery for the four flow scripts (Flow1..Flow4), each of
@@ -94,7 +95,8 @@ abstract contract FlowBase is Script {
         address quoter; // QuoterV2 (off-chain floors only)
         address permit2; // canonical Permit2
         address multicall3; // canonical Multicall3
-        address depository; // OUR depository (has depositERC20All)
+        address depository; // the ORIGINAL depository (plain depositERC20)
+        address forwarder; // BalanceForwarder (dynamic-amount bridge to the depository)
         address receiver; // whitelisted Layerswap receiver
         address feeRecipient; // fee EOA
         address executor; // relayer's Calibur account (gasless mode)
@@ -135,6 +137,7 @@ abstract contract FlowBase is Script {
         c.permit2 = vm.envOr("PERMIT2", DEFAULT_PERMIT2);
         c.multicall3 = vm.envOr("MULTICALL3", DEFAULT_MULTICALL3);
         c.depository = vm.envAddress("LAYERSWAP_DEPOSITORY");
+        c.forwarder = vm.envOr("DEPOSIT_FORWARDER", address(0));
         c.receiver = vm.envAddress("DEPOSIT_RECEIVER");
         c.feeRecipient = vm.envAddress("FEE_RECIPIENT");
         c.user = vm.addr(userPk);
@@ -199,10 +202,12 @@ abstract contract FlowBase is Script {
         return _outToken(c);
     }
 
-    /// @dev Who accumulates the swap output before depositERC20All: the executor
-    ///      (gasless batches) or Multicall3 (user-sent batches).
+    /// @dev Who accumulates the swap output before the deposit: always the
+    ///      BalanceForwarder — the router pays it directly, and its
+    ///      executeWithBalance bridges the dynamic amount into the ORIGINAL
+    ///      depository's exact-amount depositERC20.
     function _collector(Cfg memory c) internal pure returns (address) {
-        return _is(c.mode, MODE_GASLESS) ? c.executor : c.multicall3;
+        return c.forwarder;
     }
 
     // -------------------------------------------------------------------------
@@ -325,30 +330,34 @@ abstract contract FlowBase is Script {
         });
     }
 
-    /// @dev The depositERC20All tail: approve(max) -> deposit whole balance -> approve(0).
-    ///      Appended to Calibur batches (caller = executor) and Multicall3 batches
-    ///      (caller = Multicall3) alike — the collector exits at exactly 0.
-    function _depositAllTailCalls(Cfg memory c, address token) internal view returns (Call[] memory tail) {
-        tail = new Call[](3);
-        tail[0] = Call({to: token, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, type(uint256).max))});
-        tail[1] = Call({
-            to: c.depository,
-            value: 0,
-            data: abi.encodeCall(ILayerswapDepository.depositERC20All, (c.depositId, token, c.receiver))
-        });
-        tail[2] = Call({to: token, value: 0, data: abi.encodeCall(IERC20.approve, (c.depository, 0))});
+    // depositERC20(bytes32 id, address token, address receiver, uint256 amount):
+    // the amount word sits at byte offset 4 + 3*32 = 100 of the calldata template.
+    uint256 internal constant DEPOSIT_ERC20_AMOUNT_OFFSET = 100;
+
+    /// @dev The deposit tail is now ONE call: the BalanceForwarder reads its own
+    ///      live balance (the router paid the swap output to it), patches the
+    ///      amount into the depositERC20 template, approves, calls the ORIGINAL
+    ///      depository, and enforces that it exits at 0.
+    function _forwardDepositData(Cfg memory c, address token) internal view returns (bytes memory) {
+        require(c.forwarder != address(0), "DEPOSIT_FORWARDER is zero");
+        bytes memory template =
+            abi.encodeCall(ILayerswapDepository.depositERC20, (c.depositId, token, c.receiver, 0));
+        return abi.encodeCall(
+            BalanceForwarder.executeWithBalance, (token, c.depository, DEPOSIT_ERC20_AMOUNT_OFFSET, template)
+        );
     }
 
-    function _depositAllTailMc3(Cfg memory c, address token)
-        internal
-        view
-        returns (IMulticall3.Call3Value[] memory tail)
-    {
-        Call[] memory calls = _depositAllTailCalls(c, token);
-        tail = new IMulticall3.Call3Value[](3);
-        for (uint256 i; i < 3; ++i) {
-            tail[i] = IMulticall3.Call3Value({target: calls[i].to, allowFailure: false, value: 0, callData: calls[i].data});
-        }
+    function _forwardDepositCall(Cfg memory c, address token) internal view returns (Call memory) {
+        return Call({to: c.forwarder, value: 0, data: _forwardDepositData(c, token)});
+    }
+
+    function _forwardDepositMc3(Cfg memory c, address token) internal view returns (IMulticall3.Call3Value memory) {
+        return IMulticall3.Call3Value({
+            target: c.forwarder,
+            allowFailure: false,
+            value: 0,
+            callData: _forwardDepositData(c, token)
+        });
     }
 
     /// @dev Encodes router.execute(commands, inputs, deadline).
@@ -412,15 +421,15 @@ abstract contract FlowBase is Script {
     }
 
     /// @dev Router leg swapping its whole balance USDC -> WETH, output paid to
-    ///      Multicall3 (the collector for user-sent depository flows).
+    ///      the BalanceForwarder (the collector for depository flows).
     function _swapToMc3LegErc20(Cfg memory c, uint256 amountInForQuote)
         internal
         returns (IMulticall3.Call3Value memory)
     {
         uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, amountInForQuote));
-        console2.log("  minOut (WETH -> collector):", minOut);
+        console2.log("  minOut (WETH -> forwarder):", minOut);
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = _swapInput(c.multicall3, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
         return IMulticall3.Call3Value({
             target: c.router,
             allowFailure: false,
@@ -430,13 +439,13 @@ abstract contract FlowBase is Script {
     }
 
     /// @dev Router value-leg wrapping all attached ETH and swapping WETH -> USDC,
-    ///      output paid to Multicall3.
+    ///      output paid to the BalanceForwarder.
     function _wrapSwapToMc3Leg(Cfg memory c, uint256 valueWei) internal returns (IMulticall3.Call3Value memory) {
         uint256 minOut = _floor(c, _quote(c, c.weth, c.usdc, valueWei));
-        console2.log("  minOut (USDC -> collector):", minOut);
+        console2.log("  minOut (USDC -> forwarder):", minOut);
         bytes[] memory inputs = new bytes[](2);
         inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE);
-        inputs[1] = _swapInput(c.multicall3, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
+        inputs[1] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
         return IMulticall3.Call3Value({
             target: c.router,
             allowFailure: false,

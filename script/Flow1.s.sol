@@ -34,20 +34,19 @@ contract Flow1Script is FlowBase {
     }
 
     /// @dev Calibur batch: pull X -> fund router -> swap all (paid straight to the
-    ///      executor) -> approve/depositERC20All/approve(0).
+    ///      FORWARDER) -> forwarder.executeWithBalance -> original depositERC20.
     function _gasless(Cfg memory c, uint256 relayerPk, uint256 userPk) internal {
         uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, c.amountIn));
         console2.log("  swap USDC -> WETH, exact-in:", c.amountIn, " minOut:", minOut);
 
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = _swapInput(c.executor, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
 
-        Call[] memory tail = _depositAllTailCalls(c, c.weth);
-        Call[] memory calls = new Call[](6);
+        Call[] memory calls = new Call[](4);
         calls[0] = _pull3009(c, userPk, c.amountIn);
         calls[1] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.router, c.amountIn))});
         calls[2] = Call({to: c.router, value: 0, data: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)});
-        (calls[3], calls[4], calls[5]) = (tail[0], tail[1], tail[2]);
+        calls[3] = _forwardDepositCall(c, c.weth);
 
         _submitCalibur(c, relayerPk, calls);
     }
@@ -57,12 +56,11 @@ contract Flow1Script is FlowBase {
     ///      -> depositERC20All tail]. Mainnet: private submission required.
     function _userErc20(Cfg memory c, uint256 userPk) internal {
         console2.log("  swap USDC -> WETH, exact-in:", c.amountIn);
-        IMulticall3.Call3Value[] memory tail = _depositAllTailMc3(c, c.weth);
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](6);
+        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](4);
         calls[0] = _permitLegMc3(c, userPk, c.amountIn);
         calls[1] = _transferFromLegMc3(c, c.router, c.amountIn);
         calls[2] = _swapToMc3LegErc20(c, c.amountIn);
-        (calls[3], calls[4], calls[5]) = (tail[0], tail[1], tail[2]);
+        calls[3] = _forwardDepositMc3(c, c.weth);
 
         _submitMc3(c, userPk, calls, 0);
     }
@@ -71,10 +69,9 @@ contract Flow1Script is FlowBase {
     ///      Multicall3) -> depositERC20All tail].
     function _userEth(Cfg memory c, uint256 userPk) internal {
         console2.log("  wrap + swap WETH -> USDC, exact-in (wei):", c.amountEth);
-        IMulticall3.Call3Value[] memory tail = _depositAllTailMc3(c, c.usdc);
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](4);
+        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](2);
         calls[0] = _wrapSwapToMc3Leg(c, c.amountEth);
-        (calls[1], calls[2], calls[3]) = (tail[0], tail[1], tail[2]);
+        calls[1] = _forwardDepositMc3(c, c.usdc);
 
         _submitMc3(c, userPk, calls, c.amountEth);
     }

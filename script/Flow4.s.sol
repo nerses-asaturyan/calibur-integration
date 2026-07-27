@@ -40,15 +40,14 @@ contract Flow4Script is FlowBase {
         console2.log("  minOut (WETH -> depository):", minOut);
 
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = _swapInput(c.executor, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
 
-        Call[] memory tail = _depositAllTailCalls(c, c.weth);
-        Call[] memory calls = new Call[](7);
+        Call[] memory calls = new Call[](5);
         calls[0] = _pull3009(c, userPk, c.amountIn);
         calls[1] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.feeRecipient, fee))});
         calls[2] = Call({to: c.usdc, value: 0, data: abi.encodeCall(IERC20.transfer, (c.router, rest))});
         calls[3] = Call({to: c.router, value: 0, data: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)});
-        (calls[4], calls[5], calls[6]) = (tail[0], tail[1], tail[2]);
+        calls[4] = _forwardDepositCall(c, c.weth);
 
         _submitCalibur(c, relayerPk, calls);
     }
@@ -62,13 +61,12 @@ contract Flow4Script is FlowBase {
         uint256 rest = c.amountIn - fee;
         console2.log("  fee (exact):", fee, " swapped:", rest);
 
-        IMulticall3.Call3Value[] memory tail = _depositAllTailMc3(c, c.weth);
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](7);
+        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](5);
         calls[0] = _permitLegMc3(c, userPk, c.amountIn);
         calls[1] = _transferFromLegMc3(c, c.feeRecipient, fee);
         calls[2] = _transferFromLegMc3(c, c.router, rest);
         calls[3] = _swapToMc3LegErc20(c, rest);
-        (calls[4], calls[5], calls[6]) = (tail[0], tail[1], tail[2]);
+        calls[4] = _forwardDepositMc3(c, c.weth);
 
         _submitMc3(c, userPk, calls, 0);
     }
@@ -80,11 +78,10 @@ contract Flow4Script is FlowBase {
         uint256 rest = c.amountEth - fee;
         console2.log("  fee (exact wei):", fee, " swapped (wei):", rest);
 
-        IMulticall3.Call3Value[] memory tail = _depositAllTailMc3(c, c.usdc);
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](5);
+        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](3);
         calls[0] = IMulticall3.Call3Value({target: c.feeRecipient, allowFailure: false, value: fee, callData: ""});
         calls[1] = _wrapSwapToMc3Leg(c, rest);
-        (calls[2], calls[3], calls[4]) = (tail[0], tail[1], tail[2]);
+        calls[2] = _forwardDepositMc3(c, c.usdc);
 
         _submitMc3(c, userPk, calls, c.amountEth);
     }
