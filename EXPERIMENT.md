@@ -182,6 +182,46 @@ Calibur batch: [
 ]
 ```
 
+## ⚠️ Security: the permit-in-Multicall3 attack surface (ALL user-erc20 flows)
+
+On this branch **every** user-erc20 flow (1–4) uses the Multicall3 + in-batch
+EIP-2612 permit shape, so this caveat now covers all of them (on the main
+branch it applied only to flows 1 & 4).
+
+While the user's tx is pending in a **public mempool**, its calldata — including
+the permit signature — is visible to everyone, and the signature is bound only
+to `spender = Multicall3`, which **anyone can drive**. Two attacks follow:
+
+**⚠️ Attack A — front-run theft (the serious one):** a bot extracts the
+signature and submits its own
+`MC3.[permit(user, MC3, X), transferFrom(user → attacker, X)]` with higher gas.
+The user's funds are gone before their tx executes. `allowFailure` does
+**nothing** against this. **The ONLY defense is that the signature is never
+publicly visible → private/MEV-protected submission (Flashbots Protect,
+MEV Blocker, or backend `eth_sendPrivateTransaction`) is MANDATORY on
+mainnet.** Public-mempool submission of these flows must be treated as unsafe,
+full stop. (Sepolia demos ran publicly as an accepted testnet-only exception.)
+
+**Attack B — nonce grief escalating to theft (what `allowFailure=true` fixes):**
+the attacker submits *just* the permit, consuming its nonce and setting the
+allowance. The user's permit leg then fails:
+- with `allowFailure=false`, the whole batch reverts — but the allowance was
+  set by the *attacker's* tx and survives the user's revert → a standing
+  allowance to public Multicall3 → drained at leisure;
+- with `allowFailure=true`, the batch proceeds and the very next
+  `transferFrom` legs consume the allowance immediately → the attacker gained
+  nothing.
+
+| Defense | Stops A (front-run theft) | Stops B (grief → theft) |
+|---|---|---|
+| `allowFailure=true` on the permit leg | ❌ | ✅ |
+| private/MEV-protected submission | ✅ | ✅ |
+
+`allowFailure=true` is defense-in-depth *behind* private submission, not a
+substitute for it. It is also fail-safe: if the permit failed for a real reason
+(expired, invalid) and no allowance exists, the next `transferFrom` leg reverts
+the batch anyway — funds can never move unauthorized.
+
 ## The 13 proven transactions (original depository `0xbc51…D0b4`)
 
 | Flow | gasless | user-erc20 (Multicall3+permit) | user-eth (direct SF call) |
