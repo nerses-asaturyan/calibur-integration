@@ -1,507 +1,190 @@
-# Calibur (EIP-7702) · USDC EIP-3009 → LayerswapDepository — Sepolia
+# Bransfer flows — gasless & user-sent DeFi deposits (Sepolia PoC)
 
-A user signs **one** EIP-3009 `receiveWithAuthorization`; a Calibur smart account
-(an EOA delegated via EIP-7702) then runs **one atomic batch** that pulls the
-USDC and forwards it into the LayerswapDepository. If any step reverts, nothing
-moves and the signature's nonce stays unused.
+Four payment flows × three funding modes = **12 proven on-chain transactions**
+(+1 bonus), all sharing the same guarantees:
 
-> **[ARCHITECTURE.md](ARCHITECTURE.md)** — the final architecture: design
-> principles, roles & trust model, full capability matrix (what's gasless, what
-> isn't, and why), all proven transactions, and the decision guide.
+- **atomic** — one transaction per flow; any leg reverting rolls back everything
+  (a gasless user's signature nonce is never consumed on failure);
+- **zero dust** — every intermediary (Universal Router, Multicall3, the
+  relayer's executor) exits every transaction at exactly 0;
+- **exact-in swaps only** — the user sends what they want; quoted floors are
+  slippage *revert guards*, never amount-shapers;
+- **no orchestration contracts** — the only contract of ours is the
+  [LayerswapDepository](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code)
+  (original Layerswap contract + one added function, `depositERC20All`, which
+  forwards the **caller's whole balance read at run time** — the primitive that
+  makes fully-dynamic deposits possible). Everything else is public
+  infrastructure: Uniswap Universal Router, Permit2, Multicall3, WETH9.
 
-The repo now ships **our own `LayerswapDepository` deployment** (same contract,
-plus a `depositERC20All` function that forwards the caller's **whole balance**,
-read at run time). That one dynamic-amount primitive turns the demo flows from
-"deposit a floor, keep dust" into **zero-dust**: whatever the swaps actually
-produce is deposited, exactly.
+## The proven matrix
 
-**Addresses (Sepolia, pre-filled in `.env.example` / script defaults)**
+| Flow | gasless (relayer pays) | user-sent ERC-20 | user-sent ETH |
+|---|---|---|---|
+| **1** all in → swap → **depository** (fee on destination chain) | [`0xe98818d8…`](https://sepolia.etherscan.io/tx/0xe98818d8d41f0a59ba7832024c25557211a42e267e2c0a4cef5d3e2a7f105159) 227,706 | [`0x1868fa68…`](https://sepolia.etherscan.io/tx/0x1868fa68e2f2d2b8b1589fe927c9b3e495324c418c1224bc0cbc2ce8e3386756) 223,291 | [`0x473ba841…`](https://sepolia.etherscan.io/tx/0x473ba8412e25058dd4edd502e9ccd9f730f81026de7592b01a6c13dd4453f60c) 191,296 |
+| **2** fee (bips of input) → EOA; rest → swap → **user** | [`0x41db0488…`](https://sepolia.etherscan.io/tx/0x41db0488ad97a9f2e062ec24b9c43568d6160e980c6dd776c45c28e05ff35d91) 194,166 | [`0x72dbcf29…`](https://sepolia.etherscan.io/tx/0x72dbcf29f851de8b30c3b716d375b494b54d48ebf576ac41b28ab1970c2bc930) 172,097 | [`0x31648d26…`](https://sepolia.etherscan.io/tx/0x31648d26400abfd1035b5e1567db96468a4b1c75a25ba82375d365f270119db0) 127,146 |
+| **3** swap all → **live-exact split**: user + fee EOA | [`0x281cb73c…`](https://sepolia.etherscan.io/tx/0x281cb73c47ef0000651995a445ddfc3d43a0e95b8c74e7f730798dcce4d604c9) 208,168 | [`0x8e41563e…`](https://sepolia.etherscan.io/tx/0x8e41563e9eccce0688f6dddf7676de02cce23cf85f180e79b94d0ba8cf4edb5a) 159,627 | [`0xfc784921…`](https://sepolia.etherscan.io/tx/0xfc78492100ceba3a4331b1384c8a29b4e9f35166a4a2457e86b0aaf78dc7a70d) 151,793 |
+| **4** fee (bips of input) → EOA; rest → swap → **depository** | [`0x8a980f4d…`](https://sepolia.etherscan.io/tx/0x8a980f4d1325dc5a01ecfc6bda6ac2b16d1ac1f917b592aec9880c00c01de057) 252,220 | [`0x0b0afe85…`](https://sepolia.etherscan.io/tx/0x0b0afe854d172af24f5e8343998c084ea51cc50984c7a9f65fd7c0cdd1629356) 235,191 | [`0xb23b075d…`](https://sepolia.etherscan.io/tx/0xb23b075d339b832585387874b3467cc7eb76016cc269f5af19cbedeb6e080120) 200,614 |
+
+**Bonus** — plain-token gasless (WETH has **no** permit function → Permit2
+SignatureTransfer): [`0x7acf042f…`](https://sepolia.etherscan.io/tx/0x7acf042f6f2c191b6aadd3e9292ddb8b7c92b3c0cb6cc8de4f09502a9c5f05e1) 218,329.
+
+Demo parameters: 10 USDC / 0.002 ETH in, fee = 12.34% (`FEE_BPS=1234` — any
+bips works), ERC-20 flows swap USDC→WETH, ETH flows wrap and swap WETH→USDC.
+
+## Addresses (Sepolia)
 
 | | Address |
 |---|---|
-| USDC (Circle, EIP-3009) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
-| Calibur singleton (7702 target) | `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00` |
+| USDC (Circle: EIP-3009 **and** EIP-2612) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+| Calibur singleton (EIP-7702 target) | `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00` |
 | **LayerswapDepository (ours, verified, `depositERC20All`)** | [`0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8`](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code) |
-| LayerswapDepository (original, no `depositERC20All`) | `0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4` |
-| **PayoutSplitter (ours, verified, stateless N-way splitter)** | [`0xd952dc9C32FBC747232E888034280887B15591D3`](https://sepolia.etherscan.io/address/0xd952dc9C32FBC747232E888034280887B15591D3#code) |
 | Uniswap Universal Router | `0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b` |
-| Uniswap QuoterV2 (off-chain pricing) | `0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3` |
-| WETH9 (canonical) | `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
-| UNI | `0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984` |
-| Aave v3 Pool | `0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951` |
-| aaveWETH (Aave v3 Sepolia WETH reserve, faucet token) | `0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c` |
+| Uniswap QuoterV2 (off-chain floors) | `0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3` |
+| Permit2 (canonical) | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
+| Multicall3 (canonical) | `0xcA11bde05977b3631167028862bE2a173976CA11` |
+| WETH9 (canonical, the "plain token" demo) | `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
 
-> Requires the **Prague** EVM (EIP-7702) — already set in `foundry.toml`.
+> Requires the **Prague** EVM (EIP-7702) — set in `foundry.toml`.
 
-**Three distinct things — don't confuse them:**
+## Roles & trust model
 
-| | What it is | Role |
-|---|---|---|
-| **Calibur implementation** `0x0000…8f00` | the *code* contract | EIP-7702 delegation **target** only — **never** the EIP-3009 `to` |
-| **Executor** (= broadcaster EOA) | your operator account, delegated to the implementation | runs the batch, pays gas, and **is the EIP-3009 `to`** (`CALIBUR_EXECUTOR`, defaults to `addr(PRIVATE_KEY)`) |
-| **Payer** (user) | holds USDC, signs the authorization | the EIP-3009 `from` (`USER_PRIVATE_KEY`) — must differ from the executor |
-
-So `to == the executor's own address` (your broadcaster), **not** `0x0000…8f00`.
-
----
-
-## 1. Configure env & test manually
-
-Dependencies are git submodules. On a fresh clone:
-
-```bash
-git clone --recurse-submodules <repo-url>     # or, if already cloned:
-git submodule update --init --recursive
-```
-
-```bash
-cp .env.example .env
-# Fill: OPERATOR_PRIVATE_KEY (executor), USER_PRIVATE_KEY (payer, holds USDC),
-#       DEPOSIT_RECEIVER (must be whitelisted in the depository).
-# Public addresses are already filled. Operator and payer MUST be different accounts.
-set -a; source .env; set +a
-export PRIVATE_KEY=$OPERATOR_PRIVATE_KEY        # the delegated account self-calls execute
-```
-
-**Automated tests** (8 local + 5 live-fork; fork tests skip if `SEPOLIA_RPC_URL` is unset):
-
-```bash
-forge test -vvv                         # all
-forge test --fork-url $SEPOLIA_RPC_URL  # incl. real USDC + our live depository
-```
-
-**Deploy your own depository** (owner = `addr(PRIVATE_KEY)`, whitelist = `[DEPOSIT_RECEIVER]`):
-
-```bash
-forge script script/DeployDepository.s.sol:DeployDepositoryScript \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast --verify -vv < /dev/null
-# then point LAYERSWAP_DEPOSITORY in .env at the printed address
-```
-
-**Manual run on Sepolia** — enable once, deposit as many times as you want,
-disable only when done:
-
-```bash
-# enable EIP-7702 delegation (once)
-forge script script/EnableDelegation.s.sol:EnableDelegation --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv
-cast code $(cast wallet address --private-key $OPERATOR_PRIVATE_KEY) --rpc-url $SEPOLIA_RPC_URL
-#   expect 0xef0100…9b8f00
-
-# (optional, once) approve the depository so deposits use the cheaper 2-call batch
-forge script script/ApproveDepository.s.sol:ApproveDepository --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv
-
-# deposit (repeat per deposit; signs + randomizes nonce/depositId itself)
-forge script script/CaliburDeposit.s.sol:CaliburDepositScript --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv
-
-# disable when retiring the operator
-forge script script/DisableDelegation.s.sol:DisableDelegation --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv
-```
-
----
-
-## 2. The flow — what the user signs, what happens next
-
-**The user (payer) signs exactly one thing:** an EIP-712 `ReceiveWithAuthorization`
-typed message over USDC. The deposit script does this automatically from
-`USER_PRIVATE_KEY`; a real user signs it in their wallet.
-
-```
-ReceiveWithAuthorization {
-  from        = payer (the user)
-  to          = executor                // = your broadcaster EOA (delegated to Calibur), NOT 0x0000…8f00
-  value       = amount
-  validAfter  = 0
-  validBefore = now + 10 min            // the deadline
-  nonce       = random bytes32          // single-use
-}
-```
-
-That signature authorizes only **moving `value` USDC from the payer to the
-executor account** — nothing else.
-
-**What the executor (broadcaster) does next** — one atomic Calibur ERC-7821
-batch, every call running with `msg.sender == executor`:
-
-1. `USDC.receiveWithAuthorization(payer, executor, value, …, v, r, s)` → payer → executor
-   (USDC requires `msg.sender == to`, so the funds are bound to the executor)
-2. `USDC.approve(depository, value)` → executor approves the depository
-3. `LayerswapDepository.depositERC20(depositId, USDC, receiver, value)` → executor → whitelisted receiver
-
-Net: **payer → executor → receiver**, atomically. Any revert (bad sig, expired,
-receiver not whitelisted, paused) rolls back the receive too — the user keeps
-their USDC and the nonce is not spent.
-
-**Dropping the approve (2-call batch).** Step 2 only exists because `depositERC20`
-pulls via `transferFrom`. If you grant the depository a one-time standing
-allowance (`ApproveDepository.s.sol`), the batch becomes just steps 1 & 3 and is
-cheaper per deposit. This is safe here because the **executor holds no idle USDC**
-— funds only pass through it inside the atomic batch — so even a max approval has
-nothing to drain when idle. `CaliburDeposit` auto-detects the allowance and picks
-the 2- or 3-call batch. (The allowance is account state and persists after you
-disable delegation — revoke it with `APPROVE_AMOUNT=0` when retiring the executor.)
-
----
-
-## 3. Broadcaster checklist: validating the EIP-3009 signature
-
-Before submitting a user's signature, the broadcaster should validate the
-following. The first group prevents **theft/abuse**; the second prevents
-**wasted-gas reverts** (always dry-run the batch first).
-
-**Security (do not skip):**
-- **`to` is YOUR executor account.** Only accept a signature whose `to` is the
-  executor EOA you control (delegated to Calibur) and whose post-receipt behavior
-  is bound (this batch) — not the Calibur implementation, and never a public,
-  behavior-agnostic contract (e.g. a shared multicall), where anyone holding the
-  signature could pull the funds and sweep them elsewhere in the same tx.
-- **Use `receiveWithAuthorization`, not `transferWithAuthorization`.** The
-  `receive` variant enforces `msg.sender == to`, so no third party can replay the
-  signature against a `to` they don't control.
-- **`from != to`.** Reject payer == executor (a no-op self-transfer).
-- **Recovers to `from` against the right domain.** `ecrecover(digest) == from`,
-  where the digest uses USDC's live `DOMAIN_SEPARATOR()` (chainId 11155111,
-  verifyingContract = USDC). Guarantees authenticity and prevents cross-chain /
-  wrong-token replay.
-- **Nonce unused.** `usdc.authorizationState(from, nonce) == false` (single-use;
-  detects replay).
-- **`value` is consistent.** The amount used downstream must be bound to the
-  signed `value` (the base script uses one field for all three calls; the DeFi
-  flows guard every dynamic leg with a slippage floor).
-
-**Liveness (avoid guaranteed reverts):**
-- **Window valid with margin.** `validAfter < now` and `validBefore > now + inclusion buffer`
-  (don't sign a 2-second window); price the tx to be mined before `validBefore`.
-- **Payer can pay.** `from` USDC balance ≥ `value` and `from` is **not USDC-blacklisted**.
-- **Destination ready.** `depository.isWhitelisted(receiver)` and `!depository.paused()`.
-- **Simulate first.** Dry-run the full batch (`forge script` without `--broadcast`,
-  or `eth_call`) and only broadcast if it succeeds.
-
-> **Why these are enough against front-running:** because `to` is your Calibur
-> account and `receiveWithAuthorization` requires `msg.sender == to`, nobody else
-> can execute the authorization, and the single-use nonce + atomic batch mean a
-> leaked signature can't be replayed or partially executed to steal funds.
-
----
-
-### Layout
-
-```
-src/LayerswapDepository.sol          # our deployment: original contract + depositERC20All (whole-balance deposit)
-src/PayoutSplitter.sol               # stateless N-way % splitter + generic call hooks (ERC-20 & native), zero dust
-src/CaliburDepositBatch.sol          # pure lib: builds the 3-call batch (inlined, not deployed)
-src/interfaces/*                     # IERC3009USDC, ILayerswapDepository, IERC7821(+Call), IERC20,
-                                     #   IUniversalRouter, IQuoterV2, IAaveV3Pool, IPayoutSplitter(+Leg)
-script/DeployDepository.s.sol        # deploys + whitelists src/LayerswapDepository.sol
-script/DeploySplitter.s.sol          # deploys src/PayoutSplitter.sol (no args, no owner)
-script/EnableDelegation.s.sol        # EIP-7702 enable (executor → Calibur impl)
-script/DisableDelegation.s.sol       # EIP-7702 disable (→ plain EOA)
-script/ApproveDepository.s.sol       # optional one-time approve → enables 2-call batch
-script/CaliburDeposit.s.sol          # signs + builds + submits the batch via Calibur.execute
-script/CaliburRouterFlow.s.sol       # TX 1: 4 Uniswap pools + ETH round-trip + zero-dust deposit
-script/CaliburMultiPairFlow.s.sol    # TX 2: 3 EOAs + REAL Aave v3 supply/withdraw + 6 swaps, zero dust
-script/CaliburNativeDualFlow.s.sol   # TX 3: 3 swaps -> native ETH split to two EOAs, no depository
-script/CaliburSplitFlow.s.sol        # TX 4: arbitrary-% splits (ERC-20 + native) + ORIGINAL depository hooks
-script/NativeMulticall3Flow.s.sol    # TX 5: USER-invoked native-ETH flow via Multicall3 (known contracts only)
-script/SignReceiveAuthorization.s.sol# optional: sign out-of-band, prints v/r/s
-test/CaliburDepositLocal.t.sol       # deterministic full-flow + atomicity
-test/PayoutSplitter.t.sol            # splitter units: bps math, hooks, reverts, atomicity, reentrancy
-test/CaliburDepositSepoliaFork.t.sol # live Sepolia: real USDC + our live depository
-test/PayoutSplitterSepoliaFork.t.sol # live Sepolia: splitter + real USDC + ORIGINAL depository
-```
-
----
-
-# Guide: how the two live Sepolia transactions work
-
-Both transactions prove the same thesis — **a user moves funds with only an
-off-chain signature (no gas, no on-chain tx of their own); a relayer sponsors one
-atomic transaction that pulls the funds, runs a real multi-protocol DeFi chain, and
-pays out to two places — with ZERO DUST: every input unit ends up in a payout.**
-The only contract of our own is the depository itself (deployed + verified above);
-all dynamic orchestration is done by **unowned** infrastructure (Uniswap's
-Universal Router, Aave v3).
-
-| | Transaction | Block | Gas |
+| Role | Account | Signs | Pays gas |
 |---|---|---|---|
-| **TX 1** — 4 Uniswap pools + native ETH round-trip, zero dust | [`0x95378e76…4bff63b`](https://sepolia.etherscan.io/tx/0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b) | 11341683 | 519,836 |
-| **TX 2** — 3 EOAs + **real Aave v3 supply/withdraw** + 6 swaps, zero dust | [`0x20c49f67…645d4b6`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 11341687 | 823,647 |
-| **TX 3** — **native ETH** split to two EOAs, no depository, zero dust | [`0xa50e86d8…cb2e4c9`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 11341930 | 374,091 |
-| **TX 4** — **generic splitter**: arbitrary % (12.34/37.66/50), ERC-20 **and** native, ORIGINAL depository via call hooks | [`0xf3fe4ee3…894c76`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 11361201 | 527,556 |
-| **TX 5** — **user-invoked native-ETH** flow via **Multicall3**, known contracts only (no custom code) | [`0x21f1a9d2…5fa2885`](https://sepolia.etherscan.io/tx/0x21f1a9d2cbb4a9f6b50096cd6511f60cd90fcb0c9ea6c4cc83f3fba435fa2885) | 11361465 | 206,256 |
+| **User / payer** | plain EOA — **never** 7702-delegated | gasless: 1 off-chain authorization per flow; user-sent: their own tx | only in user-sent modes |
+| **Relayer / executor** | EOA delegated to Calibur (EIP-7702) | the tx (gasless modes) | gasless modes |
+| **Fee EOA / receiver** | plain EOAs | nothing | never |
 
-*(The earlier floor-based v1 runs — `0x74fb71b5…` and `0xbf22f0ad…` — used the
-original depository and left 198/297 units of dust; kept here only for history.)*
+The executor is pass-through only — it holds 0 before and after every flow, so
+even standing approvals have nothing to drain.
 
-## The building blocks (why almost no new code is needed)
+## The three funding modes
 
-1. **EIP-7702 delegation.** The relayer EOA is delegated to Uniswap's **Calibur**
-   smart-account implementation (`cast send $EXECUTOR --auth $CALIBUR_IMPLEMENTATION`).
-   Its on-chain code becomes `0xef0100‖<impl>`, so one EOA is simultaneously the
-   **relayer** (pays gas), the **executor** (runs an ERC-7821 batch), and the
-   EIP-3009 **`to`**.
-2. **EIP-3009 gasless inbound.** The payer signs `receiveWithAuthorization` off-chain.
-   USDC requires `msg.sender == to`, and the executor *is* `to`, so only the executor
-   can redeem it. The payer spends no gas and sends no transaction.
-3. **ERC-7821 batch.** The executor runs a fixed `Call[]` in one transaction via
-   `execute(mode, abi.encode(calls))`. If any call reverts, the whole batch reverts —
-   the EIP-3009 receive is undone and its nonce is never consumed.
-4. **Universal Router `CONTRACT_BALANCE`.** A static batch can't carry an amount that
-   isn't known until a swap runs. We pre-fund Uniswap's **unowned** Universal Router
-   and issue swap commands with `amountIn = CONTRACT_BALANCE` — each leg consumes
-   whatever the previous leg produced.
-5. **`depositERC20All` — the zero-dust finisher.** The v1 flows had one "partial"
-   leg: a static `Call` must name an exact amount, so they deposited a
-   slippage-computed floor and kept the excess as dust. `depositERC20All` reads the
-   executor's **whole balance at run time** and forwards it — the deposit itself
-   becomes dynamic-amount, and the executor always ends at exactly **0**.
-6. **Aave's own dynamic-amount primitive (TX 2).**
-   `AavePool.withdraw(asset, type(uint256).max, to)` withdraws the caller's entire
-   aToken balance and can pay it **directly to the Universal Router** — so the chain
-   re-enters the router with no static-amount hop. Supply+withdraw in the same
-   transaction round-trips the exact amount (no time passes → no interest accrues).
-7. **Atomicity.** Inbound + swaps + Aave + fee + deposit: all or nothing.
+**`gasless`** — the user signs one off-chain authorization; the relayer's
+Calibur account runs an atomic ERC-7821 batch and pays all gas. Inbound per
+token type: **USDC** → EIP-3009 `receiveWithAuthorization` (bound to
+`msg.sender == to` = our executor); **EIP-2612 tokens** → permit +
+transferFrom; **any plain token** → Permit2 `permitTransferFrom` with
+**spender = executor** (one-time `approve(Permit2)` tx per token, then
+signature-only forever — see the bonus tx).
 
-## TX 1 — four Uniswap pools + a native ETH round-trip, zero dust
+**`user-erc20`** — the user sends ONE tx themselves. Flows 2 & 3 (no depository
+leg) go **straight through the Universal Router** (`PERMIT2_PERMIT` in-router;
+the permit binds to the router's `msg.sender`, so it's **public-mempool-safe**).
+Flows 1 & 4 (depository leg) go through **Multicall3 with an in-batch EIP-2612
+permit** — `permit` is `msg.sender`-agnostic, so the allowance is created and
+consumed inside the user's own atomic tx. ⚠️ **On mainnet this shape REQUIRES
+MEV-protected submission** (Flashbots Protect / MEV Blocker): in a public
+mempool the permit signature is visible and bound only to spender = Multicall3,
+which anyone can drive. The permit leg uses `allowFailure=true` so a
+front-run/replayed permit (nonce grief) cannot brick the batch.
 
-Script: `script/CaliburRouterFlow.s.sol`. Input: **10000** USDC units (0.01 USDC).
-Roles: payer `0x719b…BD0d`; relayer/executor `0xF651…778D`; fee EOA `0x0e86…F001`.
+**`user-eth`** — the user sends ONE tx with native ETH (nothing can pull ETH
+from a plain EOA by signature, so gasless native inbound doesn't exist —
+that's a protocol fact, not a design gap). Flows 2 & 3: router-only
+(`msg.value` → fee `TRANSFER` → `WRAP_ETH` → swap). Flows 1 & 4: Multicall3
+value-legs.
 
-The 6-call Calibur batch:
+## The four flows
 
-| # | Call |
-|---|---|
-| 1 | `USDC.receiveWithAuthorization(user → executor)` — gasless inbound |
-| 2 | `USDC.transfer(router, 10000)` — pre-fund |
-| 3 | `UniversalRouter.execute(...)` — the dynamic chain (below) |
-| 4 | `USDC.approve(depository, max)` |
-| 5 | `depository.depositERC20All(id, USDC, receiver)` — **whole balance** |
-| 6 | `USDC.approve(depository, 0)` — hygiene |
+**Flow 1 — all in → swap → depository.** The full input swaps exact-in; the
+router pays the output to the *collector* (executor in gasless, Multicall3 in
+user-sent); the collector runs `approve(max)` → `depositERC20All` →
+`approve(0)`. The **entire dynamic output** is deposited with a `Deposited`
+event. Fee is charged on the destination chain, not here.
 
-Inside call 3 the router ran **4 swaps across 4 different pools** plus a native
-WETH9 unwrap→rewrap, every leg on `CONTRACT_BALANCE`:
+**Flow 2 — split first: fee → EOA, rest → swap → user.** Fee is an **exact**
+bips cut of the known input; the swap output goes straight to the user (swap
+`recipient` = user — no intermediate hop at all).
 
-```
-executor -> router          : 10000 USDC        (pre-fund)
-router   -> USDC/WETH 0.30% : 10000 USDC        -> 434462159843 WETH
-         (WETH -> ETH -> WETH: native WETH9 round-trip)
-router   -> WETH/UNI  0.30% : 434462159843 WETH -> 19661320759 UNI
-router   -> UNI/WETH  0.05% : 19661320759 UNI   -> 431462048533 WETH
-router   -> WETH/USDC 0.05% : 431462048533 WETH -> 9868 USDC
-router   -> fee EOA         : 100 USDC           (fee payout)
-router   -> executor        : 9768 USDC          (sweep: everything left)
-executor -> LS receiver     : 9768 USDC          (depositERC20All -> Deposited(9768))
-```
+**Flow 3 — swap all → split output: user + fee EOA.** Both payout legs are
+EOAs, so the split is **live-exact** on the actual output: `PAY_PORTION`
+(fee bips of the real balance) + `SWEEP` (every remaining wei to the user).
 
-Result: **0.01 USDC in → 100 to the fee EOA + 9768 deposited to Layerswap —
-executor ends at exactly 0 USDC. Zero dust.** The payer paid no gas.
+**Flow 4 — split first: fee → EOA, rest → swap → depository.** Exact fee from
+the input, then the Flow-1 tail: the full dynamic output is deposited.
 
-## TX 2 — three EOAs, six swaps, REAL Aave v3 in the middle, zero dust
+## Security notes
 
-Script: `script/CaliburMultiPairFlow.s.sol`. Input: **10000** USDC units.
-
-- **payer** `0x719b…BD0d` — signs the EIP-3009 auth; pays nothing else.
-- **relayer / executor** `0xF651…778D` — Calibur account; pays all gas.
-- **fee recipient** `0x0e86…F001` — a third EOA, enforced distinct from both keys.
-
-**How real Aave became reachable** (the v1 README said it wasn't): Aave v3
-Sepolia's reserves are Aave's own faucet tokens, but a real Uniswap v3 pool
-(canonical **WETH9 / aaveWETH**, 0.30%) bridges them. We use the **WETH reserve
-because its supply cap is unlimited** — the aaveUSDC/aaveDAI reserves sit *above*
-their caps, so `supply` there reverts `SUPPLY_CAP_EXCEEDED` (found the hard way in
-simulation). Two more tricks make it atomic and dust-free:
-
-- the bridge pool's reverse leg can't be quoted at pre-trade state (the pool may
-  hold ~no WETH until *our* forward leg deposits it), so its floor is computed
-  analytically: a same-pool round trip always returns ≥ `input × (1-fee)²`;
-- trip 1 hands Aave exactly `floorA` (the guaranteed minimum) and **deliberately
-  leaves the excess in the router** — trip 2's `CONTRACT_BALANCE` swap consumes
-  it, so even the bridge-token excess is never dust.
-
-The 10-call Calibur batch, with the actual on-chain amounts:
-
-```
-1  USDC.receiveWithAuthorization     payer -> executor : 10000 USDC   (gasless)
-2  USDC.transfer(router)             executor -> router: 10000 USDC
-3  router trip 1 (4 swaps, 4 pools):
-     USDC/WETH  0.30% : 10000 USDC          -> 434462158020 WETH
-     WETH/UNI   0.30% : 434462158020 WETH   -> 19661320658 UNI
-     UNI/WETH   0.05% : 19661320658 UNI     -> 431462042624 WETH
-     WETH/aaveWETH 0.30% (bridge): 431462042624 WETH -> 242402716761 aaveWETH
-     TRANSFER 232851084895 aaveWETH -> executor   (floorA; excess 9551631866 stays in router)
-4  aaveWETH.approve(aavePool, floorA)
-5  AavePool.supply(aaveWETH, 232851084895, executor)      << REAL AAVE: aTokens minted
-6  AavePool.withdraw(aaveWETH, MAX, router)               << REAL AAVE: 232851084895 straight to router
-7  router trip 2 (2 swaps):
-     aaveWETH/WETH 0.30%: 242402716761 aaveWETH (withdraw + excess, EXACTLY all) -> 428877153962 WETH
-     WETH/USDC  0.05%   : 428877153962 WETH -> 9809 USDC
-     TRANSFER 100 USDC -> fee EOA                          (payout 1)
-     SWEEP    9709 USDC -> executor
-8  USDC.approve(depository, max)
-9  depository.depositERC20All(id, USDC, receiver)          (payout 2: Deposited(9709))
-10 USDC.approve(depository, 0)
-```
-
-Result: **0.01 USDC in → 6 swaps across 5 distinct pools + a genuine Aave v3
-supply & withdraw → 100 to the fee EOA + 9709 deposited to Layerswap. Zero dust
-in every token**: the executor ends at 0 USDC and 0 aaveWETH, and the router's
-aaveWETH excess was consumed to the last unit (232851084895 + 9551631866 =
-242402716761). Three distinct EOAs, the aToken mint/burn, and the `Deposited`
-event are all visible in the explorer logs.
-
-## TX 3 — native ETH to two EOAs, no depository
-
-Script: `script/CaliburNativeDualFlow.s.sol`. Input: **10000** USDC units (0.01 USDC).
-Roles: payer `0x719b…BD0d`; relayer/executor `0xF651…778D`; payout EOA 1 (fee, 10%)
-`0x0e86…F001`; payout EOA 2 (remainder) = **the payer itself**.
-
-The 3-call Calibur batch:
-
-| # | Call |
-|---|---|
-| 1 | `USDC.receiveWithAuthorization(user → executor)` — gasless inbound |
-| 2 | `USDC.transfer(router, 10000)` — pre-fund |
-| 3 | `UniversalRouter.execute(...)` — 3 swaps + `UNWRAP_WETH` + `PAY_PORTION` + `SWEEP` |
-
-The on-chain trace (all swap legs on `CONTRACT_BALANCE`):
-
-```
-payer    -> executor        : 10000 USDC          (gasless EIP-3009)
-executor -> router          : 10000 USDC          (pre-fund)
-router   -> USDC/WETH 0.30% : 10000 USDC          -> 437801048471 WETH
-router   -> WETH/UNI  0.30% : 437801048471 WETH   -> 19812420095 UNI
-router   -> UNI/WETH  0.05% : 19812420095 UNI     -> 434777872691 WETH
-router   UNWRAP_WETH        : 434777872691 WETH   -> 434777872691 native ETH
-router   -> payout EOA 1    : 43477787269 wei     (PAY_PORTION, exactly 10%)
-router   -> payout EOA 2    : 391300085422 wei    (SWEEP: everything left)
-```
-
-`PAY_PORTION` and `SWEEP` are the Universal Router's own payment commands — one
-takes a bps share of the router's live balance, the other takes everything that
-remains — so **both payouts are native ETH straight from the router** and the
-executor never holds the output (it ends this tx at 0 USDC/WETH/UNI, the router
-at 0 everything). And because payout EOA 2 defaults to the payer, the user
-literally **buys gas with USDC by signature**: their ETH balance went from
-26186877570000 to 26578177655422 wei (+391300085422) while sending no
-transaction and paying nothing.
-
-## TX 4 — the generic PayoutSplitter: any %, any destination, ERC-20 and native
-
-Script: `script/CaliburSplitFlow.s.sol`. Contract:
-[`PayoutSplitter`](https://sepolia.etherscan.io/address/0xd952dc9C32FBC747232E888034280887B15591D3#code)
-(`0xd952…91D3`, verified) — **stateless & permissionless** (router-like trust
-model: it splits its own live balance and must end every tx empty; a terminal
-`DustLeft` check enforces it). Legs are `(target, shareBps, amountOffset, data)`:
-empty `data` = plain transfer; non-empty = **generic call hook** with the
-run-time amount substituted into the calldata at `amountOffset`. Shares must sum
-to exactly 10000 and the **last leg takes the arithmetic remainder** — zero dust
-by construction, at any percentages.
-
-This tx proves everything at once — arbitrary non-round shares
-(**12.34% / 37.66% / 50%**), an ERC-20 split AND a native-ETH split, and the
-**ORIGINAL unextended depository** (`0xbc51…D0b4`, no `depositERC20All`) fed a
-fully dynamic amount via hooks:
-
-| # | Call |
-|---|---|
-| 1 | `USDC.receiveWithAuthorization(user → executor)` — gasless inbound |
-| 2 | `USDC.transfer(router, 10000)` — pre-fund |
-| 3 | `UniversalRouter.execute(...)` — 3 swaps, then `PAY_PORTION` 50% of the WETH → splitter (ERC-20 half) + `UNWRAP_WETH` the rest → splitter (native half) |
-| 4 | `splitter.split(WETH, …)` — 12.34% → EOA-A, 37.66% → payer, remainder → `depositERC20` **hook** (amount patched at offset 100) |
-| 5 | `splitter.split(ETH, …)` — same shares, remainder → `depositNative` **hook** (amount = msg.value) |
-
-On-chain result (WETH half 204094252081, native half 204094252082):
-
-```
-split(WETH): 25185230706 -> EOA-A        (exactly 12.34%)
-             76861895333 -> payer        (exactly 37.66%)
-            102047126042 -> ORIGINAL depository depositERC20 -> Deposited(WETH)
-split(ETH):  25185230706 -> EOA-A
-             76861895334 -> payer
-            102047126042 -> ORIGINAL depository depositNative -> Deposited(native)
-```
-
-Both `Deposited` events came from the **original** depository — the call hook
-(not a contract extension) is what made the dynamic amount possible. Splitter
-and router end at 0 in ETH/USDC/WETH/UNI: zero dust, enforced on-chain.
-
-## TX 5 — native ETH inbound, invoked by the user, known contracts only
-
-Script: `script/NativeMulticall3Flow.s.sol`. Native ETH cannot be pulled from a
-plain EOA by signature (no permit exists for ETH), so for native inbound **the
-user sends the one transaction themselves** — and it turns out no custom
-contract is needed anywhere, not even the `PayoutSplitter`:
-
-- the user chooses the ETH amount, so the inbound split is **exact values known
-  upfront** → **Multicall3** (`0xcA11…CA11`) with `aggregate3Value` acts as the
-  splitter — value-bearing calls with arbitrary calldata;
-- amounts are only *dynamic* after a swap, and there the **Universal Router's
-  own `PAY_PORTION`/`SWEEP`** split dynamically.
-
-One user tx, `aggregate3Value{value: 0.002 ETH}` (all-or-revert):
-
-| # | Leg | Value |
-|---|---|---|
-| 1 | plain ETH send → fee EOA | exactly 12.34% = 246800000000000 wei |
-| 2 | `depositNative(id, receiver)` → **ORIGINAL depository** (emits `Deposited`) | exactly 37.66% = 753200000000000 wei |
-| 3 | `router.execute{value}`: `WRAP_ETH` → swap WETH→USDC (0.05%) → `PAY_PORTION` 25% USDC → fee EOA, `SWEEP` rest → user | remainder 50% = 1000000000000000 wei |
-
-On-chain result: 24035914 USDC out of the swap → 6008978 (25%) to the fee EOA +
-18026936 (75%) back to the user; router ends at 0 in everything; **Multicall3's
-balance delta is exactly 0**. Every contract touched — Multicall3, WETH9, the
-Uniswap pool, the Universal Router, the original depository — is pre-existing
-public infrastructure.
-
-> Evaluated known splitter alternatives: **0xSplits** (v2 is on Sepolia) can't
-> feed the depository — its recipients get plain transfers and the depository
-> has no `receive()`; **Disperse** sends exact amounts to EOAs only. Multicall3
-> value-legs + router `PAY_PORTION`/`SWEEP` cover both roles. Safety note:
-> passing your own ETH through Multicall3 atomically is safe; handing an
-> EIP-3009 *signature* to a public multicall is NOT (see §3) — the difference
-> is that here nothing can be replayed or redirected.
+- **EIP-3009 checklist (gasless):** only accept signatures whose `to` is your
+  executor; use `receiveWithAuthorization` (enforces `msg.sender == to`);
+  verify recovery against USDC's live `DOMAIN_SEPARATOR()`; check
+  `authorizationState` (single-use nonce); dry-run the batch before
+  broadcasting. A leaked signature is unusable by anyone else, and atomicity
+  means failure never consumes the nonce.
+- **Permit2 spender binding:** gasless plain-token signatures bind
+  **spender = executor** — same safety property as EIP-3009. Never sign
+  Permit2/2612 messages with a public contract as spender unless the tx is
+  privately submitted (the Flow 1/4 user-erc20 caveat above).
+- **Multicall3 side effect:** `depositERC20All` from Multicall3 deposits MC3's
+  *whole* balance of that token — including any stranded tokens strangers left
+  in the public contract. They ride into the deposit (receiver gains). Never
+  park funds in MC3/the router between transactions.
+- **Why an allowance to Multicall3 is never safe** (and why flows 1 & 4 use an
+  in-batch permit instead): MC3 executes arbitrary calldata for anyone, so a
+  standing allowance to it belongs to the whole world.
 
 ## Run them yourself
 
 ```bash
+cp .env.example .env    # fill keys; see .env.example comments
 set -a; source .env; set +a; export PRIVATE_KEY=$OPERATOR_PRIVATE_KEY
 
-# TX 1 (drop --broadcast to simulate first):
-forge script script/CaliburRouterFlow.s.sol:CaliburRouterFlowScript \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
+# one-time setup:
+forge script script/DeployDepository.s.sol:DeployDepositoryScript --rpc-url $SEPOLIA_RPC_URL --broadcast --verify -vv < /dev/null
+forge script script/EnableDelegation.s.sol:EnableDelegation --rpc-url $SEPOLIA_RPC_URL --broadcast -vvv   # relayer -> Calibur
+# user-erc20 flows 2&3 + bonus need one-time approvals from the USER's key:
+#   cast send $USDC_SEPOLIA "approve(address,uint256)" 0x000000000022D473030F116dDEE9F6B43aC78BA3 $(cast max-uint) --private-key $USER_PRIVATE_KEY --rpc-url $SEPOLIA_RPC_URL
 
-# TX 2:
-forge script script/CaliburMultiPairFlow.s.sol:CaliburMultiPairFlowScript \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
+# any cell of the matrix (drop --broadcast to simulate):
+FUNDING_MODE=gasless    forge script script/Flow1.s.sol:Flow1Script --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
+FUNDING_MODE=user-erc20 forge script script/Flow3.s.sol:Flow3Script --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
+FUNDING_MODE=user-eth   forge script script/Flow4.s.sol:Flow4Script --rpc-url $SEPOLIA_RPC_URL --broadcast -vv < /dev/null
 ```
 
-Required env: the base vars plus `FEE_RECIPIENT`, `FEE_AMOUNT`, `AMOUNT_IN`;
-optional overrides `WETH_SEPOLIA`, `UNI_SEPOLIA`, `UNIVERSAL_ROUTER`,
-`UNISWAP_QUOTER`, `AAVE_POOL_SEPOLIA`, `AAVE_WETH_SEPOLIA`, `POOL_FEE_1..4`,
-`POOL_FEE_A..D`, `POOL_FEE_AAVE`, `SLIPPAGE_BPS` (sane Sepolia defaults baked in).
+Key env: `FUNDING_MODE`, `AMOUNT_IN` (USDC units), `AMOUNT_ETH` (wei),
+`FEE_BPS`, `SLIPPAGE_BPS`, plus the addresses/keys in `.env.example`.
 
-## Verify it yourself
+## Tests
 
 ```bash
-RPC=https://ethereum-sepolia-rpc.publicnode.com
-
-# 1. confirm success + gas
-cast receipt 0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b --rpc-url $RPC
-cast receipt 0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6 --rpc-url $RPC
-
-# 2. our verified depository (source + Deposited events on Etherscan):
-#    https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8
-
-# 3. the executor's Calibur delegation is visible as code 0xef0100 + impl:
-cast code 0xF6517026847B4c166AAA176fe0C5baD1A245778D --rpc-url $RPC
-
-# 4. zero dust: executor's USDC balance is 0 after both runs
-cast call 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238 "balanceOf(address)(uint256)" \
-  0xF6517026847B4c166AAA176fe0C5baD1A245778D --rpc-url $RPC
+forge test                              # 13 local (base deposit flow)
+forge test --fork-url $SEPOLIA_RPC_URL  # + 14 fork tests that drive the ACTUAL
+                                        #   flow scripts in every mode (27 total)
 ```
 
-On Etherscan, the story to point at: **(a)** the `from` of the tx is the *relayer*,
-not the payer — yet USDC leaves the *payer's* balance (gasless EIP-3009);
-**(b)** the token-transfer list shows the funds hopping through four/five Uniswap
-pools — and in TX 2, entering and leaving **Aave v3** (aToken mint + burn);
-**(c)** two outbound payouts — the fee EOA and the Layerswap receiver — with the
-depository's `Deposited` event confirming the credited amount; **(d)** the
-executor's balances end at exactly zero: **no dust anywhere**.
+The fork tests execute `Flow1..Flow4 + BonusPermit2Flow` end-to-end per funding
+mode against real USDC/router/Permit2/Multicall3/depository, asserting exact
+fees, full-output deposits, live-exact splits, the zero-dust invariant, and
+atomicity (paused depository → user funds untouched, nonce unused).
+
+## Layout
+
+```
+src/LayerswapDepository.sol          # original Layerswap contract + depositERC20All
+src/CaliburDepositBatch.sol          # pure lib for the base (no-swap) deposit flow
+src/interfaces/*                     # IERC7821(+Call), IERC20, IERC3009USDC, IERC20Permit,
+                                     #   IPermit2, IWETH9, ILayerswapDepository, IUniversalRouter, IQuoterV2
+script/FlowBase.s.sol                # shared: config, signing (3009/2612/Permit2), program builders
+script/Flow1.s.sol .. Flow4.s.sol    # the matrix (FUNDING_MODE selects the cell)
+script/BonusPermit2Flow.s.sol        # plain-token gasless inbound (Permit2)
+script/DeployDepository.s.sol        # deploy + whitelist our depository
+script/EnableDelegation.s.sol        # EIP-7702 enable (relayer -> Calibur)
+script/DisableDelegation.s.sol       # EIP-7702 disable
+script/ApproveDepository.s.sol       # optional: cheaper 2-call base batch
+script/CaliburDeposit.s.sol          # base flow: gasless USDC -> depository, no swap
+script/SignReceiveAuthorization.s.sol# optional: sign EIP-3009 out-of-band
+test/CaliburDepositLocal.t.sol       # base flow unit tests (mock USDC/executor)
+test/CaliburDepositSepoliaFork.t.sol # base flow on real Sepolia state
+test/FlowsSepoliaFork.t.sol          # the matrix: 14 end-to-end fork tests
+```
+
+## History
+
+Earlier iterations of this repo proved the building blocks separately —
+router-native swap chains with floor-based deposits (`0x74fb71b5…`,
+`0xbf22f0ad…`), zero-dust v2 flows incl. a real Aave v3 supply/withdraw
+sandwich (`0x95378e76…`, `0x20c49f67…`), native dual-EOA payouts
+(`0xa50e86d8…`), a generic N-way splitter contract (`0xf3fe4ee3…`, since
+removed by design decision), and the first user-invoked Multicall3 flow
+(`0x21f1a9d2…`). See git history for the full evolution; the matrix above
+supersedes all of them.

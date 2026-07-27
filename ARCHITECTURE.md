@@ -1,146 +1,77 @@
-# Final Architecture — Gasless DeFi Deposit Flows (PoC, Sepolia)
+# Architecture — the final flow matrix
 
-**Thesis, proven on-chain:** a user moves funds with *only off-chain signatures*
-(no gas, no transactions of their own); a relayer sponsors **one atomic
-transaction** that pulls the funds, runs a real multi-protocol DeFi chain, and
-pays out to one or more destinations — **with zero dust** and (almost) zero
-contracts of our own.
+**Thesis, proven on-chain (13 Sepolia txs, table in the README):** users fund
+payment flows in ERC-20 (gaslessly, by signature) or in ERC-20/native ETH
+(sending one tx themselves); one atomic transaction runs exact-in Uniswap
+swaps and pays out to EOAs and/or the Layerswap depository — with zero dust
+and no orchestration contracts.
 
-## 1. Design principles (fixed)
+## Design principles (fixed by decision)
 
-1. **The user is always a plain EOA.** The user is *never* EIP-7702-delegated —
-   they only ever produce off-chain signatures. All account-level complexity
-   lives on the relayer side.
-2. **Only the relayer is a smart account.** The relayer EOA is delegated to
-   Uniswap's audited **Calibur** singleton (EIP-7702) and executes ERC-7821
-   batches; it broadcasts, pays all gas, and is the signature's `to`.
-3. **Unowned infrastructure does the dynamic work.** Uniswap's Universal Router
-   (swap chains, splits, sweeps, native ETH) and Aave v3 (`withdraw(MAX)`)
-   provide every dynamic-amount primitive. The router is an *executor, not a
-   brain* — routes are chosen off-chain (QuoterV2 / SOR) and encoded; on-chain
-   protection is min-out floors only.
-4. **One contract of our own, only where an event is required:** the
-   `LayerswapDepository` (deployed + verified), extended with `depositERC20All`
-   — the whole-balance, run-time-read deposit that makes flows **zero-dust**.
-5. **Atomicity as the safety net.** Everything runs in one ERC-7821 batch: any
-   revert (slippage floor, expired window, paused depository) rolls back the
-   inbound leg too — the user's signature nonce is never consumed on failure.
+1. **The user is always a plain EOA** — never EIP-7702-delegated. Only the
+   relayer's executor is a Calibur smart account.
+2. **Exact-in swaps only** — the UI lets users send any amount; quoted floors
+   are slippage revert-guards, never amount-shapers.
+3. **Zero dust** — every intermediary (router, Multicall3, executor) exits
+   every tx at 0. Dynamic-amount exits do the work: swap-recipient targeting,
+   `PAY_PORTION`/`SWEEP`, and `depositERC20All` (whole-balance, run-time read —
+   the one function we added to the original Layerswap depository, and the only
+   custom code in the system).
+4. **Public infrastructure over new contracts** — Universal Router (swaps +
+   payment commands), Permit2 (signature pulls), Multicall3 (user-sent
+   batching), WETH9. The router is an *executor, not a brain*: routes are
+   chosen off-chain (QuoterV2) and encoded; on-chain protection is min-out.
 
-## 2. Roles & trust model
+## The matrix (4 flows × 3 modes — all proven)
 
-| Role | Account type | Signs | Pays gas | Holds funds |
+Flows: **1** all→swap→depository · **2** exact fee→EOA, rest→swap→user ·
+**3** swap→live-exact split (user+fee) · **4** exact fee→EOA, rest→swap→depository.
+
+| Mode | Entry | Inbound mechanism | Depository flows (1&4) | Notes |
 |---|---|---|---|---|
-| **User / payer** | plain EOA | 1 off-chain authorization per flow | never | their own, until pulled |
-| **Relayer / executor** | EOA delegated to Calibur | the transaction | always | pass-through only (0 before & after each flow) |
-| **Fee wallet / payout EOAs** | plain EOAs | nothing | never | receive payouts |
+| gasless | relayer's Calibur batch (ERC-7821) | EIP-3009 (USDC) / EIP-2612 / **Permit2, spender = executor** (any plain token; bonus tx) | executor collects → `depositERC20All` | user signs only; nonce unspent on revert |
+| user-erc20 | router-only (flows 2&3) / Multicall3 (flows 1&4) | `PERMIT2_PERMIT` in-router (mempool-safe) / in-batch EIP-2612 permit | MC3 collects → `depositERC20All` | ⚠️ flows 1&4 on mainnet REQUIRE MEV-protected submission |
+| user-eth | router-only (2&3) / Multicall3 value-legs (1&4) | `msg.value` (no signature exists for native — protocol fact) | MC3 collects → `depositERC20All` | user pays own gas by definition |
 
-Trust facts:
-- `receiveWithAuthorization` enforces `msg.sender == to` → only our executor can
-  redeem the user's signature; leaked signatures are unusable by third parties.
-- The executor holds no idle funds, so even standing approvals have nothing to drain.
-- The Universal Router must never hold funds *across* transactions (anyone can
-  sweep it) — it only holds them *within* the atomic batch.
-- The user's exposure per flow = exactly the signed `value`, nothing else.
+## Precision rules
 
-## 3. Capability matrix
+- **Split before swap** (flows 2, 4 fee legs): exact bips of the known input.
+- **Split after swap, EOAs only** (flow 3): live-exact bips of the actual
+  output (`PAY_PORTION` + `SWEEP`).
+- **Deposit after swap** (flows 1, 4): the FULL dynamic output via
+  `depositERC20All` — no floors, no remainder legs.
 
-### Inbound (what the user pays with — signatures only, user never delegated)
+## Trust model & residual risks
 
-| Asset | Mechanism | Gasless? | Status |
-|---|---|---|---|
-| USDC | EIP-3009 `receiveWithAuthorization` | ✅ fully, 1 signature | **proven** (all 4 txs) |
-| EIP-2612 tokens (e.g. UNI) | `permit` sig + `transferFrom` in-batch | ✅ fully, 2 signatures | designed, not yet demoed |
-| Arbitrary ERC-20 | one-time `approve(Permit2)` tx by user, then Permit2 signatures per flow | ⚠️ gasless after one-time user tx | designed, not yet demoed |
-| **Native ETH** | gasless: — · user-invoked: **Multicall3 `aggregate3Value`** (one user tx, known contracts only) | ❌ gasless impossible without delegating the user · ✅ user-invoked | **proven** (TX 5) |
+- Executor is pass-through (0 before/after every flow); leaked gasless
+  signatures are unusable (spender/`to` binding); atomicity protects the nonce.
+- **Multicall3 permits (flows 1&4 user-erc20):** the 2612 permit is created and
+  consumed in one atomic user tx, but the signature binds only
+  spender = Multicall3 — public-mempool submission is front-runnable ⇒
+  **private submission required on mainnet**. The permit leg is
+  `allowFailure=true` so nonce-griefing can't strand an allowance-with-revert.
+- **Stranded-funds side effect:** `depositERC20All` from MC3 sweeps MC3's whole
+  token balance — strangers' stranded tokens ride into the deposit (receiver
+  gains; Layerswap credits more than the user sent — accounting should expect
+  this edge). Never park funds in public pass-through contracts between txs.
+- **Slippage window:** floors are quoted pre-broadcast; violent moves revert
+  the flow (safe: retry with fresh quote).
+- **Relayer liveness** (gasless): a signature is worthless without a
+  broadcaster; run redundant relayers.
 
-> The gasless native-inbound cell is a protocol fact, not a gap: nothing can
-> pull ETH out of a plain EOA with only an off-chain signature (no permit
-> exists for ETH). Since this architecture forbids user-side 7702, gasless
-> native inbound is explicitly excluded. The **user-invoked** path (TX 5) keeps
-> everything else — atomicity, arbitrary splits, depository events, zero dust —
-> in one transaction the user sends themselves: exact-value legs via Multicall3
-> (input amount is user-chosen, so no dynamic splitter is needed) plus the
-> router's `PAY_PORTION`/`SWEEP` for post-swap dynamic splits.
+## Hard limits (protocol-level, by design)
 
-### Mid-steps (inside the atomic batch, all dynamic-amount)
+1. **Gasless native ETH inbound is impossible** for a plain EOA — no signature
+   can move ETH. User-sent is the native path (proven).
+2. **Plain tokens need one `approve(Permit2)` tx per token, ever** — then
+   signature-only (bonus tx). EIP-3009/2612 tokens are signature-only from
+   day one.
+3. **User-sent ERC-20 + depository in one PUBLIC-mempool tx** — unsafe; the
+   private-submission requirement is irreducible without new contracts or
+   user-side 7702 (both banned).
 
-| Step | Primitive | Status |
-|---|---|---|
-| Multi-pool swap chains | Universal Router `V3_SWAP_EXACT_IN` + `CONTRACT_BALANCE` | **proven** (up to 6 swaps / 5 pools) |
-| Native wrap/unwrap | `WRAP_ETH` / `UNWRAP_WETH` | **proven** |
-| Real Aave v3 supply+withdraw | `supply(floor)` → `withdraw(MAX, → router)` sandwich | **proven** (TX 2) |
+## Aggregator slot (0x etc., skipped for now)
 
-### Outbound (where funds end up)
-
-| Destination | Mechanism | Dust | Status |
-|---|---|---|---|
-| Layerswap depository | `approve(max)` → `depositERC20All` → `approve(0)` | **0** | **proven** (TX 1, TX 2) |
-| Two+ EOAs, ERC-20 | router `TRANSFER` (exact) / `PAY_PORTION` (bips) / `SWEEP` (rest) | 0 | proven pattern (fee legs of TX 1–2) |
-| Two+ EOAs, **native ETH** | `UNWRAP_WETH` → `PAY_PORTION` + `SWEEP` with token = `address(0)` | **0** | **proven** (TX 3 — payer received gas money gaslessly) |
-| **N-way arbitrary-% split** — EOAs + any contract (incl. the **original** depository), ERC-20 **and** native | `PayoutSplitter.split`: last-leg remainder + calldata amount substitution (call hooks) | **0** (enforced by terminal `DustLeft` check) | **proven** (TX 4 — 12.34/37.66/50 in WETH and ETH, `depositERC20`/`depositNative` hooks) |
-
-## 4. The proven transactions (Sepolia)
-
-| # | What it proves | Tx | Gas |
-|---|---|---|---|
-| 1 | 4 pools + ETH round-trip → zero-dust depository deposit | [`0x95378e76…`](https://sepolia.etherscan.io/tx/0x95378e760765db56775fb6b6c135f6b08af039aaf5d1f221da8dfcb794bff63b) | 519,836 |
-| 2 | 3 EOAs + **real Aave v3** + 6 swaps → zero-dust deposit | [`0x20c49f67…`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 823,647 |
-| 3 | Native-ETH dual-EOA payout, no depository, 3-call batch | [`0xa50e86d8…`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 374,091 |
-| 4 | Generic splitter: arbitrary % (12.34/37.66/50), ERC-20 + native, ORIGINAL depository via hooks | [`0xf3fe4ee3…`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 527,556 |
-| 5 | User-invoked native-ETH inbound via Multicall3, known contracts only (splits + depositNative + swap) | [`0x21f1a9d2…`](https://sepolia.etherscan.io/tx/0x21f1a9d2cbb4a9f6b50096cd6511f60cd90fcb0c9ea6c4cc83f3fba435fa2885) | 206,256 |
-| 0 | Base flow: plain USDC → depository (no DeFi) | see README §2 | ~130k |
-
-Infrastructure: our verified depository
-[`0x4fFF…20E8`](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code);
-Calibur singleton `0x0000…8f00`; Universal Router `0x3A9D…F98b`; Aave v3 pool
-`0x6Ae4…8951` (WETH reserve — the only one under its supply cap).
-
-## 5. The five key mechanisms (the whole trick)
-
-1. **EIP-3009** — gasless inbound bound to our executor (`msg.sender == to`).
-2. **EIP-7702 + ERC-7821 (Calibur)** — one relayer EOA = broadcaster + smart
-   account + signature recipient; atomic batches.
-3. **`CONTRACT_BALANCE` sentinel** — each router leg consumes the previous
-   leg's full output; no intermediate amount needed at sign time.
-4. **Dynamic-amount exits** — `SWEEP`/`PAY_PORTION` (router), `withdraw(MAX)`
-   (Aave), `depositERC20All` (ours), and `PayoutSplitter.split` (ours: bps
-   shares of the live balance, last leg = arithmetic remainder, call hooks with
-   run-time amount substitution): every terminal leg reads balances at run
-   time → zero dust by construction.
-5. **Off-chain pricing, on-chain floors** — QuoterV2 quotes each hop from the
-   previous hop's *minimum*; unquotable legs (one-sided bridge pools) get
-   analytic floors (`input × (1-fee)²`); floors only guard reverts, never set
-   amounts.
-
-## 6. Decision guide
-
-- **USDC → Layerswap, no DeFi** → base flow (`CaliburDeposit.s.sol`), 2–3 calls.
-- **USDC → DeFi chain → Layerswap** → `CaliburRouterFlow` (single trip) or
-  `CaliburMultiPairFlow` (+ Aave sandwich), zero dust via `depositERC20All`.
-- **USDC → DeFi chain → people/EOAs (incl. native ETH)** →
-  `CaliburNativeDualFlow`, 3-call batch, router pays everyone directly.
-- **Arbitrary-% payouts to any mix of EOAs and contracts (incl. the original
-  depository), ERC-20 or native** → `CaliburSplitFlow` with `PayoutSplitter`
-  (stateless; verified at `0xd952…91D3`); the router's `PAY_PORTION` only takes
-  bips of its own balance, the splitter generalizes that to N legs + call hooks.
-- **Non-USDC inbound** → add a Permit2/EIP-2612 leg in place of the EIP-3009
-  call; everything downstream is unchanged.
-- **Native inbound / "user has only ETH"** → not gasless under this
-  architecture (would require delegating the user). Proven alternative
-  (TX 5): ONE user-sent Multicall3 tx — exact-% value legs (EOAs +
-  `depositNative`) plus a router leg (`WRAP_ETH` → swap → dynamic
-  `PAY_PORTION`/`SWEEP`), zero custom contracts. Or: wrap to WETH + Permit2
-  for gasless-thereafter.
-
-## 7. Known limits & residual risks
-
-- **Relayer liveness/censorship**: the user's signature is worthless without a
-  broadcaster; mitigate with redundant relayers (signature binds `to`, so any
-  relayer we control can be the executor only if it's the signed `to`).
-- **Slippage window**: floors are quoted pre-broadcast; violent moves between
-  quote and inclusion revert the flow (safe: nonce unspent, retry with fresh quote).
-- **Sepolia liquidity ≠ mainnet**: pool selection and fee tiers were chosen for
-  Sepolia's actual liquidity; mainnet would re-run the same off-chain routing.
-- **Depository owner powers**: our depository is `Ownable2Step` + `Pausable` +
-  whitelist — standard operational trust in the deposit destination, unchanged
-  from Layerswap's original design.
+Any protocol qualifies as the swap leg if it accepts pre-funded/pulled input
+and pays a designated recipient: 0x Swap API v2 (Settler/AllowanceHolder,
+mainnet-only) replaces the router leg one-for-one when needed.
