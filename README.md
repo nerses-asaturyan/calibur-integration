@@ -201,6 +201,7 @@ script/CaliburRouterFlow.s.sol       # TX 1: 4 Uniswap pools + ETH round-trip + 
 script/CaliburMultiPairFlow.s.sol    # TX 2: 3 EOAs + REAL Aave v3 supply/withdraw + 6 swaps, zero dust
 script/CaliburNativeDualFlow.s.sol   # TX 3: 3 swaps -> native ETH split to two EOAs, no depository
 script/CaliburSplitFlow.s.sol        # TX 4: arbitrary-% splits (ERC-20 + native) + ORIGINAL depository hooks
+script/NativeMulticall3Flow.s.sol    # TX 5: USER-invoked native-ETH flow via Multicall3 (known contracts only)
 script/SignReceiveAuthorization.s.sol# optional: sign out-of-band, prints v/r/s
 test/CaliburDepositLocal.t.sol       # deterministic full-flow + atomicity
 test/PayoutSplitter.t.sol            # splitter units: bps math, hooks, reverts, atomicity, reentrancy
@@ -226,6 +227,7 @@ Universal Router, Aave v3).
 | **TX 2** — 3 EOAs + **real Aave v3 supply/withdraw** + 6 swaps, zero dust | [`0x20c49f67…645d4b6`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 11341687 | 823,647 |
 | **TX 3** — **native ETH** split to two EOAs, no depository, zero dust | [`0xa50e86d8…cb2e4c9`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 11341930 | 374,091 |
 | **TX 4** — **generic splitter**: arbitrary % (12.34/37.66/50), ERC-20 **and** native, ORIGINAL depository via call hooks | [`0xf3fe4ee3…894c76`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 11361201 | 527,556 |
+| **TX 5** — **user-invoked native-ETH** flow via **Multicall3**, known contracts only (no custom code) | [`0x21f1a9d2…5fa2885`](https://sepolia.etherscan.io/tx/0x21f1a9d2cbb4a9f6b50096cd6511f60cd90fcb0c9ea6c4cc83f3fba435fa2885) | 11361465 | 206,256 |
 
 *(The earlier floor-based v1 runs — `0x74fb71b5…` and `0xbf22f0ad…` — used the
 original depository and left 198/297 units of dust; kept here only for history.)*
@@ -421,6 +423,41 @@ split(ETH):  25185230706 -> EOA-A
 Both `Deposited` events came from the **original** depository — the call hook
 (not a contract extension) is what made the dynamic amount possible. Splitter
 and router end at 0 in ETH/USDC/WETH/UNI: zero dust, enforced on-chain.
+
+## TX 5 — native ETH inbound, invoked by the user, known contracts only
+
+Script: `script/NativeMulticall3Flow.s.sol`. Native ETH cannot be pulled from a
+plain EOA by signature (no permit exists for ETH), so for native inbound **the
+user sends the one transaction themselves** — and it turns out no custom
+contract is needed anywhere, not even the `PayoutSplitter`:
+
+- the user chooses the ETH amount, so the inbound split is **exact values known
+  upfront** → **Multicall3** (`0xcA11…CA11`) with `aggregate3Value` acts as the
+  splitter — value-bearing calls with arbitrary calldata;
+- amounts are only *dynamic* after a swap, and there the **Universal Router's
+  own `PAY_PORTION`/`SWEEP`** split dynamically.
+
+One user tx, `aggregate3Value{value: 0.002 ETH}` (all-or-revert):
+
+| # | Leg | Value |
+|---|---|---|
+| 1 | plain ETH send → fee EOA | exactly 12.34% = 246800000000000 wei |
+| 2 | `depositNative(id, receiver)` → **ORIGINAL depository** (emits `Deposited`) | exactly 37.66% = 753200000000000 wei |
+| 3 | `router.execute{value}`: `WRAP_ETH` → swap WETH→USDC (0.05%) → `PAY_PORTION` 25% USDC → fee EOA, `SWEEP` rest → user | remainder 50% = 1000000000000000 wei |
+
+On-chain result: 24035914 USDC out of the swap → 6008978 (25%) to the fee EOA +
+18026936 (75%) back to the user; router ends at 0 in everything; **Multicall3's
+balance delta is exactly 0**. Every contract touched — Multicall3, WETH9, the
+Uniswap pool, the Universal Router, the original depository — is pre-existing
+public infrastructure.
+
+> Evaluated known splitter alternatives: **0xSplits** (v2 is on Sepolia) can't
+> feed the depository — its recipients get plain transfers and the depository
+> has no `receive()`; **Disperse** sends exact amounts to EOAs only. Multicall3
+> value-legs + router `PAY_PORTION`/`SWEEP` cover both roles. Safety note:
+> passing your own ETH through Multicall3 atomically is safe; handing an
+> EIP-3009 *signature* to a public multicall is NOT (see §3) — the difference
+> is that here nothing can be replayed or redirected.
 
 ## Run them yourself
 

@@ -51,12 +51,16 @@ Trust facts:
 | USDC | EIP-3009 `receiveWithAuthorization` | ✅ fully, 1 signature | **proven** (all 4 txs) |
 | EIP-2612 tokens (e.g. UNI) | `permit` sig + `transferFrom` in-batch | ✅ fully, 2 signatures | designed, not yet demoed |
 | Arbitrary ERC-20 | one-time `approve(Permit2)` tx by user, then Permit2 signatures per flow | ⚠️ gasless after one-time user tx | designed, not yet demoed |
-| **Native ETH** | — | ❌ **impossible without delegating the user** | out of scope by design |
+| **Native ETH** | gasless: — · user-invoked: **Multicall3 `aggregate3Value`** (one user tx, known contracts only) | ❌ gasless impossible without delegating the user · ✅ user-invoked | **proven** (TX 5) |
 
-> The native-inbound cell is a protocol fact, not a gap: nothing can pull ETH
-> out of a plain EOA with only an off-chain signature (no permit exists for
-> ETH). Since this architecture forbids user-side 7702, gasless native inbound
-> is explicitly excluded. (Native *outbound* is fully supported — TX 3.)
+> The gasless native-inbound cell is a protocol fact, not a gap: nothing can
+> pull ETH out of a plain EOA with only an off-chain signature (no permit
+> exists for ETH). Since this architecture forbids user-side 7702, gasless
+> native inbound is explicitly excluded. The **user-invoked** path (TX 5) keeps
+> everything else — atomicity, arbitrary splits, depository events, zero dust —
+> in one transaction the user sends themselves: exact-value legs via Multicall3
+> (input amount is user-chosen, so no dynamic splitter is needed) plus the
+> router's `PAY_PORTION`/`SWEEP` for post-swap dynamic splits.
 
 ### Mid-steps (inside the atomic batch, all dynamic-amount)
 
@@ -83,6 +87,7 @@ Trust facts:
 | 2 | 3 EOAs + **real Aave v3** + 6 swaps → zero-dust deposit | [`0x20c49f67…`](https://sepolia.etherscan.io/tx/0x20c49f6796dd12757482adafb5ace4560456702802ae40214ccd29d46645d4b6) | 823,647 |
 | 3 | Native-ETH dual-EOA payout, no depository, 3-call batch | [`0xa50e86d8…`](https://sepolia.etherscan.io/tx/0xa50e86d89397ea762eed855b2142a62654ee1caaa776aecf73ad130f1cb2e4c9) | 374,091 |
 | 4 | Generic splitter: arbitrary % (12.34/37.66/50), ERC-20 + native, ORIGINAL depository via hooks | [`0xf3fe4ee3…`](https://sepolia.etherscan.io/tx/0xf3fe4ee3acdbfff7ca1da53f92e7cd13b52d88c41a19a46c39a67a4ce0894c76) | 527,556 |
+| 5 | User-invoked native-ETH inbound via Multicall3, known contracts only (splits + depositNative + swap) | [`0x21f1a9d2…`](https://sepolia.etherscan.io/tx/0x21f1a9d2cbb4a9f6b50096cd6511f60cd90fcb0c9ea6c4cc83f3fba435fa2885) | 206,256 |
 | 0 | Base flow: plain USDC → depository (no DeFi) | see README §2 | ~130k |
 
 Infrastructure: our verified depository
@@ -121,9 +126,11 @@ Calibur singleton `0x0000…8f00`; Universal Router `0x3A9D…F98b`; Aave v3 poo
 - **Non-USDC inbound** → add a Permit2/EIP-2612 leg in place of the EIP-3009
   call; everything downstream is unchanged.
 - **Native inbound / "user has only ETH"** → not gasless under this
-  architecture (would require delegating the user). Alternatives: the user
-  makes one normal `depositNative` tx, or swaps to USDC once and uses the
-  gasless flows thereafter.
+  architecture (would require delegating the user). Proven alternative
+  (TX 5): ONE user-sent Multicall3 tx — exact-% value legs (EOAs +
+  `depositNative`) plus a router leg (`WRAP_ETH` → swap → dynamic
+  `PAY_PORTION`/`SWEEP`), zero custom contracts. Or: wrap to WETH + Permit2
+  for gasless-thereafter.
 
 ## 7. Known limits & residual risks
 
