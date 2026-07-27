@@ -18,6 +18,10 @@ Four payment flows × three funding modes = **12 proven on-chain transactions**
 
 ## The proven matrix
 
+The four flows, top to bottom = Flow 1 → Flow 4 (same order as the table rows):
+
+![The four flows: 1) user → uniswap → depository; 2) user → fee EOA + uniswap → value to user; 3) user → uniswap → value to user + fee EOA; 4) user → fee EOA + uniswap → depository](docs/flow-diagrams.jpg)
+
 | Flow | gasless (relayer pays) | user-sent ERC-20 | user-sent ETH |
 |---|---|---|---|
 | **1** all in → swap → **depository** (fee on destination chain) | [`0xe98818d8…`](https://sepolia.etherscan.io/tx/0xe98818d8d41f0a59ba7832024c25557211a42e267e2c0a4cef5d3e2a7f105159) 227,706 | [`0x1868fa68…`](https://sepolia.etherscan.io/tx/0x1868fa68e2f2d2b8b1589fe927c9b3e495324c418c1224bc0cbc2ce8e3386756) 223,291 | [`0x473ba841…`](https://sepolia.etherscan.io/tx/0x473ba8412e25058dd4edd502e9ccd9f730f81026de7592b01a6c13dd4453f60c) 191,296 |
