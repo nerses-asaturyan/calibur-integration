@@ -3,6 +3,7 @@ pragma solidity ^0.8.29;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IPermit2} from "./interfaces/IPermit2.sol";
 import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
@@ -55,7 +56,34 @@ struct TokenSplit {
 ///      transactions (anyone could direct its balance) — fund and consume
 ///      within ONE atomic transaction. A malicious (target, data) can only
 ///      redirect funds the caller itself routed here in the same tx.
-///      Fee-on-transfer / rebasing tokens are out of scope.
+///
+/// @dev SCOPE OF THE ZERO-DUST GUARANTEE (read carefully):
+///      At the end of a run the contract asserts zero balance of every token
+///      NAMED in `splits`, PLUS native ETH always (`runWithPermit`/
+///      `permitAndRun` also assert the pulled intake token). It does NOT and
+///      cannot enumerate arbitrary tokens a hook might produce — so the caller
+///      MUST name every token its hooks create (e.g. a swap's output token) as
+///      a split, or that residue is left and is permissionlessly claimable
+///      (I-01). "Nothing left behind" holds only for named + native + intake.
+///
+/// @dev KNOWN, ACCEPTED PROPERTIES (audit dispositions):
+///      - I-01 leftover balances are permissionlessly claimable (Multicall3-
+///        style model); do not park funds across txs.
+///      - I-02 `LegPaid.amount` for a hook is the PROGRAMMED input amount, not
+///        a measured delivery — indexers must not treat it as a receipt.
+///      - I-03 out-of-scope tokens include blacklist / pausable / transfer-hook
+///        tokens as well as fee-on-transfer / rebasing (I-04).
+///      - I-05 the Permit2 witness is an opaque hash in wallet UIs (binding is
+///        sound on-chain; the wallet may not render leg details).
+///      - I-06 witness binding prevents PLAN SUBSTITUTION, but does not prevent
+///        sandwich MEV on a hook's swap if its min-out/slippage is loose — set
+///        tight min-outs in hook calldata.
+///      - L-02 very large split/leg arrays can exhaust caller gas (no cap;
+///        bounded by the block gas limit).
+///      - L-03 one reverting recipient aborts the whole atomic batch (by
+///        design — all-or-nothing, zero-dust).
+///      - L-04 dust totals with several paying legs can floor an early leg to
+///        zero and revert (`ZeroLegAmount`); retry with a larger amount.
 contract SplitForwarder {
     using SafeERC20 for IERC20;
 
@@ -116,6 +144,9 @@ contract SplitForwarder {
             signature
         );
         _runAll(splits);
+        // The pulled intake token MUST be fully distributed even if the caller
+        // omitted it from `splits` (closes the omitted-intake-token hole).
+        _assertConsumed(permit.permitted.token);
     }
 
     /// @notice USER-SENT entry for EIP-2612 tokens — NO Permit2, NO prior
@@ -154,6 +185,16 @@ contract SplitForwarder {
         try IERC20Permit(token).permit(msg.sender, address(this), value, deadline, v, r, s) {} catch {}
         IERC20(token).safeTransferFrom(msg.sender, address(this), value);
         _runAll(splits);
+        // The pulled intake token MUST be fully distributed even if omitted
+        // from `splits` (closes the omitted-intake-token hole).
+        _assertConsumed(token);
+    }
+
+    /// @dev Reverts unless this contract holds zero of `token` — the explicit
+    ///      guard for intake tokens that a caller may have left out of `splits`.
+    function _assertConsumed(address token) internal view {
+        uint256 remaining = IERC20(token).balanceOf(address(this));
+        if (remaining != 0) revert BalanceNotConsumed(token, remaining);
     }
 
     /// @notice Processes the splits SEQUENTIALLY: split i's hooks may produce
@@ -171,12 +212,17 @@ contract SplitForwarder {
             _split(splits[i], i);
         }
 
-        // Terminal zero-dust invariant, per touched token (checked after ALL
+        // Terminal zero-dust invariant, per named token (checked after ALL
         // splits so later splits may consume what earlier hooks produced).
         for (uint256 i; i < n; ++i) {
             uint256 remaining = _balance(splits[i].token);
             if (remaining != 0) revert BalanceNotConsumed(splits[i].token, remaining);
         }
+
+        // Native is ALWAYS checked, even when no native split is named — this
+        // closes the msg.value / hook-produced-ETH leftover hole: any ETH the
+        // call brought in or an unwrap produced must be fully distributed.
+        if (address(this).balance != 0) revert BalanceNotConsumed(address(0), address(this).balance);
     }
 
     function _split(TokenSplit calldata s, uint256 si) internal {
@@ -224,7 +270,8 @@ contract SplitForwarder {
                 continue;
             }
 
-            uint256 amount = (i == lastPaying) ? total - distributed : (total * leg.shareBps) / BPS;
+            // mulDiv (L-01): full-precision, no overflow on pathological totals.
+            uint256 amount = (i == lastPaying) ? total - distributed : Math.mulDiv(total, leg.shareBps, BPS);
             if (amount == 0) revert ZeroLegAmount(si, i);
             distributed += amount;
 

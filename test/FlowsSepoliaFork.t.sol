@@ -398,6 +398,23 @@ contract FlowsSepoliaForkTest is Test {
     //   Intent-binding: a replayer with ALTERED splits cannot steal          //
     // --------------------------------------------------------------------- //
 
+    /// @dev Terminal-invariant fix: native ETH is ALWAYS checked, so a caller
+    ///      who sends msg.value with a plan that names no native split can no
+    ///      longer strand that ETH (it would previously sit and be sweepable).
+    function testFork_Terminal_NativeLeftoverReverts() public onlyFork {
+        deal(USDC, address(forwarder), 1_000_000); // fund a USDC-only plan
+        TokenSplit[] memory splits = new TokenSplit[](1);
+        Leg[] memory legs = new Leg[](1);
+        legs[0] = Leg({target: feeEoa, shareBps: 10_000, amountOffset: type(uint256).max, data: ""});
+        splits[0] = TokenSplit({token: USDC, legs: legs});
+
+        vm.deal(address(this), 1 ether);
+        // USDC distributes fine, but the 0.1 ETH sent as value is unaccounted →
+        // terminal native check reverts the whole call.
+        vm.expectRevert(abi.encodeWithSelector(SplitForwarder.BalanceNotConsumed.selector, address(0), 0.1 ether));
+        forwarder.run{value: 0.1 ether}(splits);
+    }
+
     /// @dev The core security property of runWithPermit: the user's Permit2
     ///      witness commits to keccak256(abi.encode(splits)). An attacker who
     ///      lifts the pending signature and swaps in their OWN splits (e.g.
