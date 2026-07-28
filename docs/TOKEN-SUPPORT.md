@@ -1,44 +1,43 @@
-# Token support guide
+# Token support — what this branch actually implements
 
-Which inbound method to use for which token, in each funding mode — and what
-each one costs the user up front.
+Inbound methods that exist in the code today (`experiment/deposit-forwarder`).
+Nothing aspirational — see "Not implemented" at the bottom for what is *not* here.
 
 ## Legend
+- 🟢 no prerequisite — signature only
+- 🟡 one-time `approve(Permit2)` per token (shared across the ecosystem)
+- ✅ implemented · ❌ not possible
 
-**Prerequisite** (one-time, before any flow):
-- 🟢 **none** — signature only, nothing on-chain first
-- 🟡 **Permit2** — one `approve(Permit2)` per token; *shared across the whole
-  ecosystem* (Uniswap etc.), so often already done
-- 🟠 **approve** — classic per-app token approval
-- 🔴 **7702** — one-time user account delegation (Calibur); account-level trust
+## Matrix (implemented)
 
-✅ recommended · ▫️ possible alternative · ❌ impossible
-
-## Matrix
-
-| Token type | Gasless (relayer pays gas) | With-gas (user pays gas) |
+| Token type | Gasless (relayer pays) | With-gas (user pays) |
 |---|---|---|
-| **EIP-3009**<br>(USDC, EURC…) | ✅ `receiveWithAuthorization` · 🟢 none | ✅ `receiveWithAuthorization` · 🟢 none <br>▫️ Permit2 · 🟡 |
-| **EIP-2612**<br>(permit tokens) | ✅ `permit` (spender = executor) · 🟢 none <br>▫️ Permit2 · 🟡 | ✅ `permitAndRun` (self-submit) · 🟢 none <br>▫️ Permit2 · 🟡 |
-| **Plain ERC-20**<br>(no permit) | ✅ Permit2 · 🟡 <br>▫️ standing approve → relayer · 🟠 | ✅ Permit2 · 🟡 <br>▫️ approve + call · 🟠 <br>▫️ user 7702 · 🔴 |
-| **Native ETH** | ❌ impossible — no signature can move ETH | ✅ user sends `value` · 🟢 none |
-| **Any token, one delegation** | ✅ user-side **7702** covers everything · 🔴 | ✅ same · 🔴 |
+| **USDC (EIP-3009)** | ✅ `receiveWithAuthorization`, spender = executor · 🟢 | ✅ `runWithPermit` (Permit2 witness) · 🟡 |
+| **Plain ERC-20** (e.g. WETH) | ✅ Permit2 `permitWitnessTransferFrom`, spender = executor · 🟡 *(`BonusPermit2Flow`)* | ✅ `runWithPermit` (Permit2 witness) · 🟡 |
+| **Native ETH** | ❌ impossible (no signature moves ETH) | ✅ user sends `value` (direct `SF.run{value}`) · 🟢 |
 
-## How to read it
+Where each lives:
+- **Gasless** = relayer's Calibur (EIP-7702) ERC-7821 batch. USDC inbound leg is
+  EIP-3009 (`_pull3009`); plain-token inbound is Permit2 SignatureTransfer
+  (`BonusPermit2Flow`).
+- **With-gas ERC-20** = user calls `SF.runWithPermit(...)` directly; the Permit2
+  signature carries a witness = `keccak256(splits)` (intent-bound).
+- **With-gas native** = user calls `SF.run{value}(...)` directly.
 
-- **Permit-capable tokens (3009 / 2612) are free** — signature-only, no
-  prerequisite, both modes. This is the sweet spot.
-- **Plain tokens always cost one approval** — a protocol fact, not a design
-  gap. The mildest form is the *shared* Permit2 approve (🟡), not a per-app one.
-- **Gasless native ETH is impossible** — nothing moves ETH by signature. Native
-  is always user-sent (`value`).
-- **user-side 7702 (🔴)** is the only thing that makes *every* token
-  prerequisite-free in both modes — at the cost of account-level trust. (It's
-  what Relay does in production.)
+## Prerequisites, precisely
+- USDC gasless: **none** (EIP-3009 signature only).
+- Everything else ERC-20: **one `approve(Permit2)`** per token, ever.
+- Native: none.
 
-## Safety note
+## Safety
+No MEV-protected RPC required. Gasless signatures bind `spender = executor`;
+`runWithPermit` binds a witness over the whole payout plan, so a mempool
+observer can only execute the user's exact intent (proven:
+`testFork_Intent_AlteredSplitsReplayReverts`).
 
-Every signature method above is bound so a mempool observer cannot redirect
-funds: EIP-3009 / EIP-2612 bind `spender` (gasless) or `msg.sender` (self-submit);
-Permit2 uses a witness committing to the whole payout plan. **No MEV-protected
-RPC is required.**
+## NOT implemented (discussed, not in code)
+- **EIP-2612 native path** (`permit` / `permitAndRun`) — would remove the
+  Permit2 approve for permit tokens. Not present.
+- **User-side EIP-7702** — would remove all per-token prerequisites. Not used
+  (only the relayer is 7702-delegated, for gasless).
+- **Fee-on-transfer / rebasing tokens** — out of scope by design.
