@@ -23,21 +23,24 @@ import {SplitForwarder, Leg, TokenSplit} from "../src/SplitForwarder.sol";
 ///           plain tokens); the RELAYER's Calibur account (EIP-7702) executes an
 ///           atomic ERC-7821 batch and pays all gas. USER_PRIVATE_KEY signs,
 ///           PRIVATE_KEY broadcasts.
-///         * "user-erc20" — the USER sends one tx themselves. Flows without a
-///           depository leg go straight through the Universal Router
-///           (PERMIT2_PERMIT — public-mempool-safe). Flows WITH a depository leg
-///           go through Multicall3 with an in-batch EIP-2612 permit — on MAINNET
-///           THIS SHAPE REQUIRES PRIVATE/MEV-PROTECTED SUBMISSION (Flashbots
-///           Protect / MEV Blocker): the permit signature is visible in a public
-///           mempool and is bound only to spender = Multicall3, which anyone can
-///           drive. Fine on a testnet demo.
-///         * "user-eth"   — the USER sends one tx with native ETH. Router-only
-///           where possible; Multicall3 value-legs when a depository leg exists.
+///         * "user-erc20" — the USER sends ONE tx: SplitForwarder.runWithPermit.
+///           The user's Permit2 signature carries a WITNESS committing to
+///           keccak256(abi.encode(splits)) — the entire payout plan. This is
+///           PUBLIC-MEMPOOL-SAFE WITH NO SUBMISSION ASSUMPTIONS: a front-runner
+///           who copies the pending signature can only execute this exact plan
+///           (funds forced to the forwarder; any altered split changes the
+///           witness and invalidates the sig), i.e. they'd merely pay the
+///           user's gas. One-time prerequisite: user approved Permit2.
+///         * "user-eth"   — the USER sends ONE direct SplitForwarder.run{value}
+///           call: a native call-only leg carries msg.value into router.execute,
+///           then the output split runs. (No signature exists for native ETH, so
+///           nothing is stealable regardless of mempool.)
 ///
 ///         ZERO DUST INVARIANT (all flows, all modes): every intermediary
-///         (router, Multicall3, executor) exits the transaction at exactly 0 —
-///         deposits use depositERC20All (whole-balance, run-time read), swaps
-///         pay their recipient directly, fee legs are exact. Swaps are always
+///         (Universal Router, SplitForwarder, relayer executor) exits the
+///         transaction at exactly 0 — deposits forward the whole live balance
+///         via the SplitForwarder into the ORIGINAL depository, splits give the
+///         last leg the remainder, fee legs are exact. Swaps are always
 ///         EXACT-IN; quoted floors are used ONLY as revert guards (min-out).
 abstract contract FlowBase is Script {
     // --- ERC-7821 / EIP-3009 ---
@@ -54,6 +57,11 @@ abstract contract FlowBase is Script {
         keccak256("TokenPermissions(address token,uint256 amount)");
     bytes32 internal constant PERMIT2_TRANSFER_FROM_TYPEHASH = keccak256(
         "PermitTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)"
+    );
+    // Permit2 SignatureTransfer WITNESS typehash (witness = bytes32, matching
+    // SplitForwarder.WITNESS_TYPESTRING).
+    bytes32 internal constant PERMIT2_WITNESS_TYPEHASH = keccak256(
+        "PermitWitnessTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline,bytes32 witness)TokenPermissions(address token,uint256 amount)"
     );
     // Permit2 AllowanceTransfer typehashes.
     bytes32 internal constant PERMIT2_DETAILS_TYPEHASH =
@@ -400,19 +408,60 @@ abstract contract FlowBase is Script {
         return Call({to: c.forwarder, value: 0, data: _sfRunData(c, splits)});
     }
 
-    function _sfRunMc3(Cfg memory c, TokenSplit[] memory splits)
-        internal
-        pure
-        returns (IMulticall3.Call3Value memory)
-    {
-        return IMulticall3.Call3Value({target: c.forwarder, allowFailure: false, value: 0, callData: _sfRunData(c, splits)});
-    }
-
     /// @dev user-eth flows submit ONE direct call: SplitForwarder.run{value}.
     function _submitSfNative(Cfg memory c, uint256 userPk, TokenSplit[] memory splits, uint256 value) internal {
         vm.startBroadcast(userPk);
         SplitForwarder(payable(c.forwarder)).run{value: value}(splits);
         vm.stopBroadcast();
+    }
+
+    /// @dev Call-only leg (shareBps = 0): no amount moves, target is just
+    ///      invoked — e.g. router.execute after a plain leg pre-funded it.
+    function _callOnlyLeg(address target, bytes memory data) internal pure returns (Leg memory) {
+        return Leg({target: target, shareBps: 0, amountOffset: NO_SUB, data: data});
+    }
+
+    function _legs3(Leg memory a, Leg memory b, Leg memory x) internal pure returns (Leg[] memory legs) {
+        legs = new Leg[](3);
+        (legs[0], legs[1], legs[2]) = (a, b, x);
+    }
+
+    /// @dev INTENT-BOUND user-erc20 entry: ONE direct SplitForwarder.runWithPermit
+    ///      tx. The Permit2 witness signature commits to keccak256(abi.encode(splits)),
+    ///      so the pending tx is PUBLIC-MEMPOOL-SAFE: a front-runner can only
+    ///      execute this exact payout plan (paying the user's gas). One-time
+    ///      prerequisite: user has approved Permit2 for the token.
+    function _submitSfRunWithPermit(Cfg memory c, uint256 userPk, uint256 amount, TokenSplit[] memory splits)
+        internal
+    {
+        uint256 deadline = block.timestamp + 10 minutes;
+        uint256 nonce = vm.randomUint(); // Permit2 SignatureTransfer nonces are unordered
+        IPermit2.PermitTransferFrom memory permit = IPermit2.PermitTransferFrom({
+            permitted: IPermit2.TokenPermissions({token: c.usdc, amount: amount}),
+            nonce: nonce,
+            deadline: deadline
+        });
+        bytes memory sig = _signPermit2Witness(c, userPk, permit, keccak256(abi.encode(splits)));
+
+        vm.startBroadcast(userPk);
+        SplitForwarder(payable(c.forwarder)).runWithPermit(permit, c.user, splits, sig);
+        vm.stopBroadcast();
+    }
+
+    function _signPermit2Witness(
+        Cfg memory c,
+        uint256 userPk,
+        IPermit2.PermitTransferFrom memory permit,
+        bytes32 witness
+    ) internal view returns (bytes memory) {
+        bytes32 tokenPerms =
+            keccak256(abi.encode(PERMIT2_TOKEN_PERMISSIONS_TYPEHASH, permit.permitted.token, permit.permitted.amount));
+        bytes32 structHash = keccak256(
+            abi.encode(PERMIT2_WITNESS_TYPEHASH, tokenPerms, c.forwarder, permit.nonce, permit.deadline, witness)
+        );
+        bytes32 digest = keccak256(abi.encodePacked(hex"1901", IPermit2(c.permit2).DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPk, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     /// @dev Encodes router.execute(commands, inputs, deadline).
@@ -442,73 +491,6 @@ abstract contract FlowBase is Script {
         return abi.encode(single, sig);
     }
 
-    // --- Multicall3 leg builders (each its own frame: avoids stack-too-deep) ---
-
-    /// @dev In-batch EIP-2612 permit leg (spender = Multicall3). allowFailure =
-    ///      TRUE so an attacker replaying the permit alone (nonce grief) cannot
-    ///      brick the batch — the transferFrom legs still run on the allowance.
-    function _permitLegMc3(Cfg memory c, uint256 userPk, uint256 value)
-        internal
-        view
-        returns (IMulticall3.Call3Value memory)
-    {
-        uint256 deadline = block.timestamp + 10 minutes;
-        (uint8 v, bytes32 r, bytes32 s) = _sign2612(c, userPk, c.multicall3, value, deadline);
-        return IMulticall3.Call3Value({
-            target: c.usdc,
-            allowFailure: true,
-            value: 0,
-            callData: abi.encodeCall(IERC20Permit.permit, (c.user, c.multicall3, value, deadline, v, r, s))
-        });
-    }
-
-    function _transferFromLegMc3(Cfg memory c, address to, uint256 amount)
-        internal
-        pure
-        returns (IMulticall3.Call3Value memory)
-    {
-        return IMulticall3.Call3Value({
-            target: c.usdc,
-            allowFailure: false,
-            value: 0,
-            callData: abi.encodeCall(IERC20.transferFrom, (c.user, to, amount))
-        });
-    }
-
-    /// @dev Router leg swapping its whole balance USDC -> WETH, output paid to
-    ///      the BalanceForwarder (the collector for depository flows).
-    function _swapToMc3LegErc20(Cfg memory c, uint256 amountInForQuote)
-        internal
-        returns (IMulticall3.Call3Value memory)
-    {
-        uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, amountInForQuote));
-        console2.log("  minOut (WETH -> forwarder):", minOut);
-        bytes[] memory inputs = new bytes[](1);
-        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
-        return IMulticall3.Call3Value({
-            target: c.router,
-            allowFailure: false,
-            value: 0,
-            callData: _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)
-        });
-    }
-
-    /// @dev Router value-leg wrapping all attached ETH and swapping WETH -> USDC,
-    ///      output paid to the BalanceForwarder.
-    function _wrapSwapToMc3Leg(Cfg memory c, uint256 valueWei) internal returns (IMulticall3.Call3Value memory) {
-        uint256 minOut = _floor(c, _quote(c, c.weth, c.usdc, valueWei));
-        console2.log("  minOut (USDC -> forwarder):", minOut);
-        bytes[] memory inputs = new bytes[](2);
-        inputs[0] = abi.encode(ADDRESS_THIS, CONTRACT_BALANCE);
-        inputs[1] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.weth, c.usdc), false);
-        return IMulticall3.Call3Value({
-            target: c.router,
-            allowFailure: false,
-            value: valueWei,
-            callData: _routerCall(abi.encodePacked(WRAP_ETH, V3_SWAP_EXACT_IN), inputs)
-        });
-    }
-
     // -------------------------------------------------------------------------
     // Submitters
     // -------------------------------------------------------------------------
@@ -516,12 +498,6 @@ abstract contract FlowBase is Script {
     function _submitCalibur(Cfg memory c, uint256 relayerPk, Call[] memory calls) internal {
         vm.startBroadcast(relayerPk);
         IERC7821(c.executor).execute(ERC7821_BATCH_MODE, abi.encode(calls));
-        vm.stopBroadcast();
-    }
-
-    function _submitMc3(Cfg memory c, uint256 userPk, IMulticall3.Call3Value[] memory calls, uint256 value) internal {
-        vm.startBroadcast(userPk);
-        IMulticall3(c.multicall3).aggregate3Value{value: value}(calls);
         vm.stopBroadcast();
     }
 

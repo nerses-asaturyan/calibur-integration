@@ -71,18 +71,15 @@ transferFrom; **any plain token** → Permit2 `permitTransferFrom` with
 **spender = executor** (one-time `approve(Permit2)` tx per token, then
 signature-only forever — see the bonus tx).
 
-**`user-erc20`** — the user sends ONE tx themselves: **Multicall3 with an
-in-batch EIP-2612 permit** (on this branch ALL four flows use this shape — the
-splits moved out of the router into the SplitForwarder for venue independence).
-`permit` is `msg.sender`-agnostic, so the allowance is created and consumed
-inside the user's own atomic tx. ⚠️ **On mainnet this shape REQUIRES
-MEV-protected submission** (Flashbots Protect / MEV Blocker): in a public
-mempool the permit signature is visible and bound only to spender = Multicall3,
-which anyone can drive — a bot can front-run with `[permit, transferFrom(user →
-attacker)]` and steal the funds. The permit leg uses `allowFailure=true` so a
-front-run/replayed permit (nonce grief) cannot escalate into a standing
-drainable allowance. **Full attack-vector analysis: EXPERIMENT.md → "Security:
-the permit-in-Multicall3 attack surface".**
+**`user-erc20`** — the user sends ONE tx themselves: `SplitForwarder.runWithPermit`.
+The user's Permit2 signature uses **`permitWitnessTransferFrom`** with a witness
+committing to `keccak256(abi.encode(splits))` — the entire payout plan. This is
+**public-mempool-safe with no submission assumptions**: a front-runner who
+copies the pending signature is forced into the user's exact intent (funds go
+only to the forwarder; altering any split changes the witness and invalidates
+the signature), so they can at most pay the user's gas. One-time prerequisite:
+`approve(Permit2)` per token. **Full analysis: EXPERIMENT.md → "Security:
+user-sent ERC-20 flows are mempool-safe (intent-bound)".**
 
 **`user-eth`** — the user sends ONE tx with native ETH (nothing can pull ETH
 from a plain EOA by signature, so gasless native inbound doesn't exist —

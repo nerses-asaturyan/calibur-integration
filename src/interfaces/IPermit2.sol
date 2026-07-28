@@ -39,6 +39,18 @@ interface IPermit2 {
         bytes calldata signature
     ) external;
 
+    /// @notice SignatureTransfer with a WITNESS: extra caller-verified data
+    ///         bound into the signature (used by SplitForwarder.runWithPermit
+    ///         to commit the entire payout plan into the user's authorization).
+    function permitWitnessTransferFrom(
+        PermitTransferFrom memory permit,
+        SignatureTransferDetails calldata transferDetails,
+        address owner,
+        bytes32 witness,
+        string calldata witnessTypeString,
+        bytes calldata signature
+    ) external;
+
     // --- AllowanceTransfer ---
     struct PermitDetails {
         address token;

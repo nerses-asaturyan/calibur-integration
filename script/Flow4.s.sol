@@ -63,17 +63,20 @@ contract Flow4Script is FlowBase {
         _submitCalibur(c, relayerPk, calls);
     }
 
+    /// @dev ONE direct SF.runWithPermit tx (public-mempool-safe). Split 1:
+    ///      exact fee -> EOA, rest -> router, call-only leg runs the swap
+    ///      (output back to SF); split 2 deposits the full output.
     function _userErc20(Cfg memory c, uint256 userPk) internal {
         (TokenSplit[] memory inSplit, bytes memory routerData, TokenSplit[] memory depositSplit) = _erc20Pieces(c);
 
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](5);
-        calls[0] = _permitLegMc3(c, userPk, c.amountIn);
-        calls[1] = _transferFromLegMc3(c, c.forwarder, c.amountIn);
-        calls[2] = _sfRunMc3(c, inSplit);
-        calls[3] = IMulticall3.Call3Value({target: c.router, allowFailure: false, value: 0, callData: routerData});
-        calls[4] = _sfRunMc3(c, depositSplit);
+        TokenSplit[] memory splits = new TokenSplit[](2);
+        splits[0] = TokenSplit({
+            token: c.usdc,
+            legs: _legs3(inSplit[0].legs[0], inSplit[0].legs[1], _callOnlyLeg(c.router, routerData))
+        });
+        splits[1] = depositSplit[0];
 
-        _submitMc3(c, userPk, calls, 0);
+        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: native split = [exact fee -> EOA, rest -> router

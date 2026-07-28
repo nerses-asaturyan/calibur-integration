@@ -59,15 +59,27 @@ contract Flow3Script is FlowBase {
         _submitCalibur(c, relayerPk, calls);
     }
 
+    /// @dev ONE direct SF.runWithPermit tx (public-mempool-safe). Split 1 funds
+    ///      the router + runs the swap (output back to SF); split 2 is the
+    ///      live-exact output split.
     function _userErc20(Cfg memory c, uint256 userPk) internal {
-        console2.log("  swap exact-in:", c.amountIn);
-        IMulticall3.Call3Value[] memory calls = new IMulticall3.Call3Value[](4);
-        calls[0] = _permitLegMc3(c, userPk, c.amountIn);
-        calls[1] = _transferFromLegMc3(c, c.router, c.amountIn);
-        calls[2] = _swapToMc3LegErc20(c, c.amountIn);
-        calls[3] = _sfRunMc3(c, _outSplit(c, c.weth));
+        uint256 minOut = _floor(c, _quote(c, c.usdc, c.weth, c.amountIn));
+        console2.log("  swap exact-in:", c.amountIn, " minOut:", minOut);
 
-        _submitMc3(c, userPk, calls, 0);
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = _swapInput(c.forwarder, CONTRACT_BALANCE, minOut, _path(c, c.usdc, c.weth), false);
+
+        TokenSplit[] memory splits = new TokenSplit[](2);
+        splits[0] = TokenSplit({
+            token: c.usdc,
+            legs: _legs2(
+                _plainLeg(c.router, 10_000),
+                _callOnlyLeg(c.router, _routerCall(abi.encodePacked(V3_SWAP_EXACT_IN), inputs))
+            )
+        });
+        splits[1] = _outSplit(c, c.weth)[0];
+
+        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: split 1 (native) = 100% router hook (wrap + swap

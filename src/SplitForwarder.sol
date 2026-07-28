@@ -4,6 +4,8 @@ pragma solidity ^0.8.29;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {IPermit2} from "./interfaces/IPermit2.sol";
+
 /// @notice One payout leg of a token split. `data.length == 0` => plain
 ///         transfer of the leg's amount to `target` (ERC-20 safeTransfer or
 ///         native call{value}). Non-empty `data` => call hook: `target` is
@@ -12,9 +14,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///         `depositNative`, where the amount travels as msg.value). ERC-20
 ///         hooks get an exact allowance for the call, reset to zero after;
 ///         native hooks receive the amount as msg.value.
+///
+///         `shareBps == 0` => CALL-ONLY leg: no amount is computed or moved —
+///         `target` is simply called with `data` (must be a hook). This lets a
+///         split fund a venue with a plain leg and then invoke it (e.g. a
+///         prior leg transfers ERC-20 to the router, a call-only leg runs
+///         router.execute). Zero-bps legs are excluded from the remainder rule.
 struct Leg {
     address target;
-    uint96 shareBps; // legs of one TokenSplit must sum to exactly 10_000
+    uint96 shareBps; // non-zero legs of one TokenSplit must sum to exactly 10_000
     uint256 amountOffset; // hook only; NO_SUBSTITUTION = don't patch calldata
     bytes data;
 }
@@ -53,6 +61,16 @@ contract SplitForwarder {
     uint256 public constant NO_SUBSTITUTION = type(uint256).max;
     uint256 private constant BPS = 10_000;
 
+    /// @dev Canonical Permit2 (same address on all chains).
+    IPermit2 public constant PERMIT2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+
+    /// @dev Witness typestring for permitWitnessTransferFrom: the user's
+    ///      signature covers `witness = keccak256(abi.encode(splits))`, binding
+    ///      the ENTIRE payout plan (recipients, bips, hook calldata incl. swap
+    ///      programs and min-outs) into the authorization.
+    string public constant WITNESS_TYPESTRING =
+        "bytes32 witness)TokenPermissions(address token,uint256 amount)";
+
     event LegPaid(address indexed token, uint256 indexed splitIndex, address indexed target, uint256 amount, bool isHook);
 
     error NoSplits();
@@ -68,10 +86,45 @@ contract SplitForwarder {
     /// @notice Router UNWRAP_WETH / plain sends fund the native balance.
     receive() external payable {}
 
+    /// @notice INTENT-BOUND user entry: pulls `permit.permitted.amount` of the
+    ///         user's token via Permit2 permitWitnessTransferFrom and executes
+    ///         `splits` — where the user's signature cryptographically commits
+    ///         to `keccak256(abi.encode(splits))`.
+    ///
+    ///         MEMPOOL-SAFE WITHOUT ANY SUBMISSION ASSUMPTIONS: anyone who
+    ///         extracts the signature from a pending transaction can only
+    ///         execute this EXACT payout plan (funds are forced to this
+    ///         contract, and any altered splits change the witness and
+    ///         invalidate the signature) — i.e. a front-runner merely pays the
+    ///         user's gas for them.
+    ///
+    ///         One-time prerequisite per token: owner has approved Permit2.
+    function runWithPermit(
+        IPermit2.PermitTransferFrom calldata permit,
+        address owner,
+        TokenSplit[] calldata splits,
+        bytes calldata signature
+    ) external {
+        bytes32 witness = keccak256(abi.encode(splits));
+        PERMIT2.permitWitnessTransferFrom(
+            permit,
+            IPermit2.SignatureTransferDetails({to: address(this), requestedAmount: permit.permitted.amount}),
+            owner,
+            witness,
+            WITNESS_TYPESTRING,
+            signature
+        );
+        _runAll(splits);
+    }
+
     /// @notice Processes the splits SEQUENTIALLY: split i's hooks may produce
     ///         the balance split i+1 distributes (e.g. a swap hook paying this
     ///         contract). After all splits, every touched token must be at 0.
     function run(TokenSplit[] calldata splits) external payable {
+        _runAll(splits);
+    }
+
+    function _runAll(TokenSplit[] calldata splits) internal {
         uint256 n = splits.length;
         if (n == 0) revert NoSplits();
 
@@ -91,12 +144,20 @@ contract SplitForwarder {
         uint256 n = s.legs.length;
         if (n == 0) revert NoLegs(si);
 
-        // Validate before moving anything.
+        // Validate before moving anything. Zero-bps legs are CALL-ONLY steps:
+        // they must be hooks without amount substitution and don't count toward
+        // the bips sum or the remainder rule.
         uint256 sum;
+        uint256 lastPaying = type(uint256).max;
         for (uint256 i; i < n; ++i) {
             Leg calldata leg = s.legs[i];
             if (leg.target == address(0)) revert ZeroTarget(si, i);
+            if (leg.shareBps == 0) {
+                if (leg.data.length == 0 || leg.amountOffset != NO_SUBSTITUTION) revert ZeroLegAmount(si, i);
+                continue;
+            }
             sum += leg.shareBps;
+            lastPaying = i;
             if (leg.data.length != 0 && leg.amountOffset != NO_SUBSTITUTION) {
                 if (leg.amountOffset < 4 || leg.amountOffset + 32 > leg.data.length) {
                     revert InvalidAmountOffset(si, i);
@@ -111,7 +172,20 @@ contract SplitForwarder {
         uint256 distributed;
         for (uint256 i; i < n; ++i) {
             Leg calldata leg = s.legs[i];
-            uint256 amount = (i == n - 1) ? total - distributed : (total * leg.shareBps) / BPS;
+
+            if (leg.shareBps == 0) {
+                // Call-only step: no amount moves; just invoke target with data.
+                (bool ok, bytes memory ret) = leg.target.call(leg.data);
+                if (!ok) {
+                    assembly ("memory-safe") {
+                        revert(add(ret, 0x20), mload(ret))
+                    }
+                }
+                emit LegPaid(s.token, si, leg.target, 0, true);
+                continue;
+            }
+
+            uint256 amount = (i == lastPaying) ? total - distributed : (total * leg.shareBps) / BPS;
             if (amount == 0) revert ZeroLegAmount(si, i);
             distributed += amount;
 

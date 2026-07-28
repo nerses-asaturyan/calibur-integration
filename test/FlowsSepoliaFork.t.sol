@@ -11,7 +11,8 @@ import {Flow4Script} from "../script/Flow4.s.sol";
 import {BonusPermit2FlowScript} from "../script/BonusPermit2Flow.s.sol";
 
 import {IERC20} from "../src/interfaces/IERC20.sol";
-import {SplitForwarder} from "../src/SplitForwarder.sol";
+import {SplitForwarder, Leg, TokenSplit} from "../src/SplitForwarder.sol";
+import {IPermit2} from "../src/interfaces/IPermit2.sol";
 import {NativeDepositDemoScript} from "../script/NativeDepositDemo.s.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
@@ -86,6 +87,7 @@ contract FlowsSepoliaForkTest is Test {
         vm.setEnv("AMOUNT_ETH", vm.toString(AMOUNT_ETH));
         vm.setEnv("FEE_BPS", vm.toString(FEE_BPS));
         vm.setEnv("SLIPPAGE_BPS", "100");
+        _snapDust();
     }
 
     modifier onlyFork() {
@@ -108,20 +110,36 @@ contract FlowsSepoliaForkTest is Test {
         IERC20(USDC).approve(PERMIT2, type(uint256).max);
     }
 
-    /// @dev Zero-dust invariant: router, Multicall3 (delta), and executor all
-    ///      empty in both tokens after the flow.
+    /// @dev Zero-dust invariant. The router carries pre-existing balances on the
+    ///      live fork (strangers' funds), so router checks are DELTA-based
+    ///      against a snapshot; the SplitForwarder and executor are fresh
+    ///      contracts and must be absolutely empty.
+    uint256 internal snapRouterUsdc;
+    uint256 internal snapRouterWeth;
+    uint256 internal snapRouterEth;
+
+    function _snapDust() internal {
+        // Model the router's real mainnet state: it custodies NOTHING between
+        // transactions (anyone can sweep it, so it is always drained). On the
+        // Sepolia fork it happens to hold stranger funds, which WRAP_ETH/
+        // CONTRACT_BALANCE legs would otherwise absorb — so zero it first.
+        vm.deal(ROUTER, 0);
+        deal(WETH, ROUTER, 0);
+        deal(USDC, ROUTER, 0);
+        snapRouterUsdc = 0;
+        snapRouterWeth = 0;
+        snapRouterEth = 0;
+    }
+
     function _assertNoDust() internal view {
-        assertEq(IERC20(USDC).balanceOf(ROUTER), 0, "router USDC dust");
-        assertEq(IERC20(WETH).balanceOf(ROUTER), 0, "router WETH dust");
-        assertEq(ROUTER.balance, 0, "router ETH dust");
+        assertEq(IERC20(USDC).balanceOf(ROUTER), snapRouterUsdc, "router USDC delta");
+        assertEq(IERC20(WETH).balanceOf(ROUTER), snapRouterWeth, "router WETH delta");
+        assertEq(ROUTER.balance, snapRouterEth, "router ETH delta");
         assertEq(IERC20(USDC).balanceOf(address(executor)), 0, "executor USDC dust");
         assertEq(IERC20(WETH).balanceOf(address(executor)), 0, "executor WETH dust");
         assertEq(IERC20(USDC).balanceOf(address(forwarder)), 0, "forwarder USDC dust");
         assertEq(IERC20(WETH).balanceOf(address(forwarder)), 0, "forwarder WETH dust");
-    }
-
-    function _mc3UsdcBefore() internal view returns (uint256) {
-        return IERC20(USDC).balanceOf(MULTICALL3);
+        assertEq(address(forwarder).balance, 0, "forwarder ETH dust");
     }
 
     // --------------------------------------------------------------------- //
@@ -141,12 +159,12 @@ contract FlowsSepoliaForkTest is Test {
     function testFork_Flow1_UserErc20() public onlyFork {
         Flow1Script f = new Flow1Script();
         f.setMode("user-erc20");
+        _approvePermit2();
         uint256 receiverBefore = IERC20(WETH).balanceOf(receiver);
         f.run();
         assertEq(IERC20(USDC).balanceOf(user), 90_000_000, "user paid exactly 10 USDC");
-        assertGt(IERC20(WETH).balanceOf(receiver) - receiverBefore, 0, "receiver got WETH via 2612+MC3");
-        // The forwarder (not Multicall3) collects the output now; strangers'
-        // stranded MC3 tokens no longer ride into deposits.
+        assertGt(IERC20(WETH).balanceOf(receiver) - receiverBefore, 0, "receiver got the FULL WETH output");
+        // Intent-bound: one direct runWithPermit tx, public-mempool-safe.
         _assertNoDust();
     }
 
@@ -154,10 +172,8 @@ contract FlowsSepoliaForkTest is Test {
         Flow1Script f = new Flow1Script();
         f.setMode("user-eth");
         uint256 receiverBefore = IERC20(USDC).balanceOf(receiver);
-        uint256 mc3Before = _mc3UsdcBefore();
         f.run();
         assertGt(IERC20(USDC).balanceOf(receiver) - receiverBefore, 0, "receiver got the FULL USDC output");
-        assertEq(_mc3UsdcBefore(), mc3Before, "MC3 USDC delta zero");
         _assertNoDust();
     }
 
@@ -256,6 +272,7 @@ contract FlowsSepoliaForkTest is Test {
     function testFork_Flow4_UserErc20() public onlyFork {
         Flow4Script f = new Flow4Script();
         f.setMode("user-erc20");
+        _approvePermit2();
         uint256 receiverBefore = IERC20(WETH).balanceOf(receiver);
         f.run();
         assertEq(IERC20(USDC).balanceOf(feeEoa), AMOUNT_IN * FEE_BPS / 10_000, "exact fee via 2612+MC3");
@@ -305,6 +322,73 @@ contract FlowsSepoliaForkTest is Test {
         assertGt(receiver.balance - receiverBefore, 0, "receiver got NATIVE ETH via depositNative, dynamic amount");
         assertEq(address(forwarder).balance, 0, "forwarder native dust");
         _assertNoDust();
+    }
+
+    // --------------------------------------------------------------------- //
+    //   Intent-binding: a replayer with ALTERED splits cannot steal          //
+    // --------------------------------------------------------------------- //
+
+    /// @dev The core security property of runWithPermit: the user's Permit2
+    ///      witness commits to keccak256(abi.encode(splits)). An attacker who
+    ///      lifts the pending signature and swaps in their OWN splits (e.g.
+    ///      "100% to the attacker") produces a different witness → Permit2
+    ///      rejects the signature → nothing moves. Public-mempool-safe with no
+    ///      submission assumptions.
+    function testFork_Intent_AlteredSplitsReplayReverts() public onlyFork {
+        _approvePermit2();
+        address attacker = makeAddr("attacker");
+
+        // The user signs a witness over the HONEST split (100% → depository).
+        TokenSplit[] memory honest = new TokenSplit[](1);
+        Leg[] memory hl = new Leg[](1);
+        hl[0] = Leg({
+            target: DEPOSITORY,
+            shareBps: 10_000,
+            amountOffset: 100,
+            data: abi.encodeCall(ILayerswapDepository.depositERC20, (bytes32(uint256(1)), USDC, receiver, 0))
+        });
+        honest[0] = TokenSplit({token: USDC, legs: hl});
+
+        uint256 nonce = 424242;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signWitness(userPk, USDC, 10_000_000, nonce, deadline, keccak256(abi.encode(honest)));
+
+        // The attacker replays that signature but substitutes a MALICIOUS split
+        // (100% plain transfer → attacker). Different splits ⇒ different witness.
+        TokenSplit[] memory evil = new TokenSplit[](1);
+        Leg[] memory el = new Leg[](1);
+        el[0] = Leg({target: attacker, shareBps: 10_000, amountOffset: type(uint256).max, data: ""});
+        evil[0] = TokenSplit({token: USDC, legs: el});
+
+        IPermit2.PermitTransferFrom memory permit = IPermit2.PermitTransferFrom({
+            permitted: IPermit2.TokenPermissions({token: USDC, amount: 10_000_000}),
+            nonce: nonce,
+            deadline: deadline
+        });
+
+        vm.prank(attacker);
+        vm.expectRevert(); // Permit2 InvalidSigner: the witness no longer matches
+        forwarder.runWithPermit(permit, user, evil, sig);
+
+        assertEq(IERC20(USDC).balanceOf(user), 100_000_000, "user funds untouched by the replay attempt");
+        assertEq(IERC20(USDC).balanceOf(attacker), 0, "attacker got nothing");
+    }
+
+    /// @dev Sign a Permit2 permitWitnessTransferFrom digest (spender = forwarder).
+    function _signWitness(uint256 pk, address token, uint256 amount, uint256 nonce, uint256 deadline, bytes32 witness)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 tokenPerms = keccak256(abi.encode(keccak256("TokenPermissions(address token,uint256 amount)"), token, amount));
+        bytes32 witnessTypehash = keccak256(
+            "PermitWitnessTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline,bytes32 witness)TokenPermissions(address token,uint256 amount)"
+        );
+        bytes32 structHash =
+            keccak256(abi.encode(witnessTypehash, tokenPerms, address(forwarder), nonce, deadline, witness));
+        bytes32 digest = keccak256(abi.encodePacked(hex"1901", IPermit2(PERMIT2).DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     // --------------------------------------------------------------------- //
