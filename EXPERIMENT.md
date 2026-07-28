@@ -276,6 +276,40 @@ Selected with `ERC20_AUTH=2612` (default `permit2`). Proven on Sepolia
 
 (Direct `SF.permitAndRun` calls — selector `0x4fe50e40`; SF ends at 0.)
 
+## 0x venue — proven against the REAL Settler (Ethereum mainnet fork)
+
+The swap step is a hook leg, so **0x drops in exactly like the Universal
+Router** with no SF change: SF `approve`s the real AllowanceHolder
+(`0x0000…22734`) and calls it with live **0x Swap API** calldata (the
+`exec`/Settler route), 0x pulls the sell token and delivers the buy token to
+the taker (= SF), the next split distributes it — synchronous and atomic
+(Swap API, not the async Gasless/intent product).
+
+Proven with **no mock**: `test/ZeroxMainnetFork.t.sol` forks Ethereum mainnet,
+fetches a live quote via `script/zerox_quote.sh` (ffi → 0x API, taker = the
+forked SF address), and swaps **100 USDC → WETH through the real Settler and
+real liquidity**, then splits the actual output 12.34% fee / remainder to the
+user. Run:
+
+```bash
+set -a; source .env; set +a            # provides ZEROX_API_KEY
+export MAINNET_RPC_URL=https://ethereum-rpc.publicnode.com
+forge test --ffi --fork-url $MAINNET_RPC_URL --match-contract ZeroxMainnetFork -vv
+```
+
+Result: WETH out ≈ 0.0523 (≥ the API's `minBuyAmount`), fee = exactly 12.34% of
+the real output, SF ends at 0 in USDC/WETH/ETH.
+
+**Real-world finding:** the live 0x Settler delivered a small **native-ETH
+surplus** (~0.000577 ETH, positive slippage) to the taker. Our terminal
+native-balance check (audit fix) correctly caught it — a naive flow with no
+native split would have reverted. The robust shape adds a native sweep leg, so
+the surplus is forwarded (here, to the user) and nothing is stranded. This is a
+genuine 0x integration nuance: **account for possible native surplus.**
+
+(Skipped automatically in the normal `forge test` — needs `MAINNET_RPC_URL`,
+`--ffi`, and `ZEROX_API_KEY`.)
+
 ## Gas — the price of venue independence
 
 user-erc20 and user-eth are now ONE self-contained tx each (no Multicall3, no
