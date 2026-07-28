@@ -10,8 +10,15 @@
    an address*?
 
 Both are solved by **one** stateless contract:
-[`SplitForwarder`](https://sepolia.etherscan.io/address/0x9bc92417f116dcfBbf107cbb827e3a0AC8CE84B2#code)
-(`0x9bc9…84B2`, verified, ~230 lines).
+[`SplitForwarder`](https://sepolia.etherscan.io/address/0x2DDBb3AC43FBF4e589b99834117d3d699c8F12c3#code)
+(`0x2DDB…12c3`, verified — current deploy, includes `permitAndRun`).
+
+> **Deployments:** the current `SplitForwarder` is `0x2DDB…12c3` (adds
+> `permitAndRun`). The 12-flow matrix table below was proven on the **prior**
+> deploy [`0x9bc9…84B2`](https://sepolia.etherscan.io/address/0x9bc92417f116dcfBbf107cbb827e3a0AC8CE84B2#code)
+> — identical except the additive `permitAndRun` (existing functions unchanged),
+> so those flows behave the same on the current one. The two `permitAndRun` txs
+> (add-on section) ran on `0x2DDB…12c3`.
 
 **Update — intent-bound user-sent flows (no MEV assumption).** The contract now
 also exposes `runWithPermit`, which pulls the user's ERC-20 via Permit2's
