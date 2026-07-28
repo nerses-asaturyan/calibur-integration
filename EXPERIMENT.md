@@ -13,12 +13,10 @@ Both are solved by **one** stateless contract:
 [`SplitForwarder`](https://sepolia.etherscan.io/address/0x28E815496471724e7DBA95D1a11b014110Cdb2FC#code)
 (`0x28E8…b2FC`, verified — current deploy, includes `permitAndRun`).
 
-> **Deployments:** the current `SplitForwarder` is `0x28E8…b2FC` (adds
-> `permitAndRun`). The 12-flow matrix table below was proven on the **prior**
-> deploy [`0x9bc9…84B2`](https://sepolia.etherscan.io/address/0x9bc92417f116dcfBbf107cbb827e3a0AC8CE84B2#code)
-> — identical except the additive `permitAndRun` (existing functions unchanged),
-> so those flows behave the same on the current one. The two `permitAndRun` txs
-> (add-on section) ran on `0x28E8…b2FC`.
+> **Deployment:** the current `SplitForwarder` is `0x28E8…b2FC` (audit-fixed:
+> always-native terminal check, intake-token check, `Math.mulDiv`). The full
+> 12-flow matrix below was **re-broadcast on this exact contract** — all live
+> hashes point at `0x28E8…b2FC`.
 
 **Update — intent-bound user-sent flows (no MEV assumption).** The contract now
 also exposes `runWithPermit`, which pulls the user's ERC-20 via Permit2's
@@ -231,24 +229,24 @@ The one residual (unchanged, and true of any signature scheme): a leaked
 signature for the *honest* plan can be submitted by anyone — but doing so only
 executes what the user authorized, to the recipients the user chose.
 
-## The 13 proven transactions (original depository `0xbc51…D0b4`)
+## The 12 proven flows — all on the fixed SplitForwarder `0x28E8…b2FC` (original depository `0xbc51…D0b4`)
 
 user-erc20 = ONE direct `SF.runWithPermit` tx from the user (public-mempool-safe);
 user-eth = ONE direct `SF.run{value}` tx.
 
 | Flow | gasless | user-erc20 (intent-bound) | user-eth |
 |---|---|---|---|
-| **1** all → swap → deposit full output | [`0x4be760ab…`](https://sepolia.etherscan.io/tx/0x4be760ab001369c970f60ec8f7f4748fb4803111d16f51eb5033f0c5d04f1583) 248,728 | [`0xea7a2381…`](https://sepolia.etherscan.io/tx/0xea7a2381f466ace7c0ea8e1a2111eb7a2ea27c2b3c2c29a8ae8b47d93fa258fa) 256,776 | [`0xadb8e676…`](https://sepolia.etherscan.io/tx/0xadb8e676b2c2592fd20afa45163ca075591126105246ee3f31daf552bb60f818) 206,374 |
-| **2** SF splits input (exact fee); venue → user | [`0x1db4e92d…`](https://sepolia.etherscan.io/tx/0x1db4e92da221ac8b9a526014274fd0da6c9cdecdfa31a2f4eb6355f65e7c4123) 227,870 | [`0x7ba422b9…`](https://sepolia.etherscan.io/tx/0x7ba422b9b5a202c86b40fb025d1bd439ea684ac21521e4dcfb88a6c42404f7fe) 214,262 | [`0xd9a3f03b…`](https://sepolia.etherscan.io/tx/0xd9a3f03b6f057c849032990b2c4780455bc3a3fa9f92757d26c59e20ec78a79a) 152,707 |
-| **3** swap all → SF splits ACTUAL output | [`0x584f7623…`](https://sepolia.etherscan.io/tx/0x584f7623b23a8f7e0cf2ccd26495784bed9b88941d2c1ca91a6e1d95fbcf1662) 223,356 | [`0x5a9fc921…`](https://sepolia.etherscan.io/tx/0x5a9fc921158b1a574ef6db8e623a90a54a20a42773bc0586cb2909e7850d583f) 231,960 | [`0xc7293a70…`](https://sepolia.etherscan.io/tx/0xc7293a70c9127d6462459146ac72245d1d4416a88444f05e502cf2c49063db09) 183,091 |
-| **4** SF splits input; venue → SF deposits full output | [`0xec67b14a…`](https://sepolia.etherscan.io/tx/0xec67b14aa95e38516bbe85aaaadf36bf2a1503786787b907bd5e18f593d75ecb) 298,249 | [`0x59fd3a71…`](https://sepolia.etherscan.io/tx/0x59fd3a713da8a8abc184e62e4c89eb79fe1eee8636a24b9854873cd127b91e0a) 271,855 | [`0xcc46f387…`](https://sepolia.etherscan.io/tx/0xcc46f38759b18544902f8ccc282e57a68def9b58a66283fae6864f21c4248976) 212,820 |
+| **1** all → swap → deposit full output | [`0xca5cf09f…`](https://sepolia.etherscan.io/tx/0xca5cf09f8dd0c24709a615a7bf523c3931c0b8b4c5d2a09bff3120aa71006fe9) 248,693 | [`0xd6da7659…`](https://sepolia.etherscan.io/tx/0xd6da765931c396d00b9baecd6cd2a7fc049a0282ebee2aeea2d6a9594270ab65) 258,213 | [`0xed683e7e…`](https://sepolia.etherscan.io/tx/0xed683e7eaf5ad74056c1a0d79d6de8c13b55fd08a5f7d7a0c6798793ffa90cd3) 199,474 |
+| **2** SF splits input (exact fee); venue → user | [`0x204fd22e…`](https://sepolia.etherscan.io/tx/0x204fd22ef8fd7103e71325fcb03b545ee2f34174707667752dc16427d0334c7d) 234,790 | [`0xb2a9793b…`](https://sepolia.etherscan.io/tx/0xb2a9793b6b82b3b11b5fdfd17b1366c08c8c10f2efbb9a783cbe4af57328d183) 216,092 | [`0x460b630b…`](https://sepolia.etherscan.io/tx/0x460b630bb7df53ba7f5feb42de89d447ced65f106d8c6e253cb6a8182f9ec286) 161,436 |
+| **3** swap all → SF splits ACTUAL output | [`0xa452e244…`](https://sepolia.etherscan.io/tx/0xa452e2447ed94dfa7fa3161400d995c51cd2ff2b33b4c22d0b273b19204295e6) 223,340 | [`0xf4100c0b…`](https://sepolia.etherscan.io/tx/0xf4100c0b662237d596893564d99d89c4a17fca3d6f544c944410df00c485d94f) 233,432 | [`0xc8f76971…`](https://sepolia.etherscan.io/tx/0xc8f76971c75441e68162fc353eb8bebc042c68ecece7b3bcdb91d42c5dcb285c) 174,510 |
+| **4** SF splits input; venue → SF deposits full output | [`0xa7354c86…`](https://sepolia.etherscan.io/tx/0xa7354c86f6e46614090e4acb18100988af518ade465cf728c8ef582c0d9cf4a1) 298,271 | [`0xd551cea5…`](https://sepolia.etherscan.io/tx/0xd551cea5577de8c7330b239831612c71ea3b2f7ae6a518aefc63936ac5b00c6a) 273,328 | [`0x0bb1ee4b…`](https://sepolia.etherscan.io/tx/0x0bb1ee4b4d35bb4f07870d3697da6c21a4c58543fd5954c82d7ab5bf34e2dad6) 212,884 |
 
 **Native dynamic deposit** — the capability the extended depository
 *fundamentally cannot offer* (native amounts must ride as `msg.value`; no
 contract can pull ETH from its caller):
 swap → `UNWRAP_WETH` → native ETH to SF → `depositNative` with **dynamic
 msg.value** → `Deposited(id, address(0), receiver, amount)`:
-[`0xe496f555…`](https://sepolia.etherscan.io/tx/0xe496f555e160b06b8e9457cf19448f82c3944563e63ce4c21ea3100ead0c6b09) 243,237.
+[`0x6ff9caf5…`](https://sepolia.etherscan.io/tx/0x6ff9caf5dc5078e57d158b2e3be16df77a31823c69b23e054a1a841d3f75486c) 243,237.
 
 Audited after all 13: SplitForwarder and router at **exactly 0** in
 ETH/USDC/WETH.
@@ -269,10 +267,10 @@ caller. A replayer calling with the user's signature does `permit(attacker, …)
 Selected with `ERC20_AUTH=2612` (default `permit2`). Proven on Sepolia
 (sender = the payer, USDC's native permit, Permit2 never touched):
 
-| Flow | user-erc20 · `ERC20_AUTH=2612` |
+| Flow | user-erc20 · `ERC20_AUTH=2612` (on `0x28E8…b2FC`) |
 |---|---|
-| **1** all → swap → deposit | [`0x80a7637b…`](https://sepolia.etherscan.io/tx/0x80a7637b50af0a4065c261fa5f5ec4a62689ea7442e6de11a7e8d1f81d3e23fe) 255,308 |
-| **4** fee → EOA + swap → deposit | [`0xeff12e65…`](https://sepolia.etherscan.io/tx/0xeff12e65b4ec19f98ef51df07c800c2b7365adf7e8a9d2020d5147f6e6e953e4) 269,810 |
+| **1** all → swap → deposit full output | [`0x147a06e6…`](https://sepolia.etherscan.io/tx/0x147a06e6fabf9ce0864b29059871e08b5f8a1727b465a27e987ad22ab10063be) 256,701 |
+| **4** SF splits input; venue → SF deposits full output | [`0x6751533b…`](https://sepolia.etherscan.io/tx/0x6751533b985f69b29b3bdea939210f8e5628c3dc01a26aeded84272bc3f6fa4e) 271,212 |
 
 (Direct `SF.permitAndRun` calls — selector `0x4fe50e40`; SF ends at 0.)
 
