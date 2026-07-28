@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
 
-import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
+import {FlowBase, Call, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
 
 /// @title Flow4 — user → [fee → EOA + rest → swap venue → depository (full output)]
 ///        (input split AND deposit both via the SplitForwarder; the venue only
 ///        swaps and delivers to SF — 0x-compatible)
 ///
 ///   FUNDING_MODE=gasless     relayer Calibur batch; user signs EIP-3009 only
-///   FUNDING_MODE=user-erc20  ONE user tx: Multicall3 + in-batch EIP-2612 permit
-///                            (mainnet: MEV-protected submission REQUIRED)
+///   FUNDING_MODE=user-erc20  ONE user tx: SF.runWithPermit (Permit2 witness
+///                            binds the whole plan -> public-mempool-safe, no MEV assumption)
 ///   FUNDING_MODE=user-eth    ONE user tx, DIRECTLY to SplitForwarder.run{value}
 contract Flow4Script is FlowBase {
     function run() external {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
 
-import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
+import {FlowBase, Call, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
 
 /// @title Flow1 — user → swap venue → depository (full output; fee on
 ///        destination chain, so no on-chain fee leg)
@@ -11,11 +11,11 @@ import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./
 /// deposit into the ORIGINAL depository is a 100% hook leg of SF.run.
 ///
 ///   FUNDING_MODE=gasless     relayer Calibur batch; user signs EIP-3009 only
-///   FUNDING_MODE=user-erc20  ONE user tx: Multicall3 + in-batch EIP-2612 permit
-///                            (mainnet: MEV-protected submission REQUIRED)
+///   FUNDING_MODE=user-erc20  ONE user tx: SF.runWithPermit (Permit2 witness
+///                            binds the whole plan -> public-mempool-safe, no MEV assumption)
 ///   FUNDING_MODE=user-eth    ONE user tx, DIRECTLY to SplitForwarder.run{value}:
 ///                            a native router-hook leg swaps, then the USDC
-///                            split deposits — no Multicall3 at all
+///                            split deposits the full output.
 contract Flow1Script is FlowBase {
     function run() external {
         (Cfg memory c, uint256 broadcasterPk, uint256 userPk) = _loadCfg();

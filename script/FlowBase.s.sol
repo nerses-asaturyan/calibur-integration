@@ -3,7 +3,6 @@ pragma solidity ^0.8.29;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
-import {IMulticall3} from "forge-std/interfaces/IMulticall3.sol";
 
 import {Call, IERC7821} from "../src/interfaces/IERC7821.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
@@ -91,7 +90,6 @@ abstract contract FlowBase is Script {
     address internal constant DEFAULT_ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;
     address internal constant DEFAULT_QUOTER = 0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3;
     address internal constant DEFAULT_PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-    address internal constant DEFAULT_MULTICALL3 = 0xcA11bde05977b3631167028862bE2a173976CA11;
 
     string internal constant MODE_GASLESS = "gasless";
     string internal constant MODE_USER_ERC20 = "user-erc20";
@@ -103,9 +101,8 @@ abstract contract FlowBase is Script {
         address router; // Universal Router
         address quoter; // QuoterV2 (off-chain floors only)
         address permit2; // canonical Permit2
-        address multicall3; // canonical Multicall3
         address depository; // the ORIGINAL depository (plain depositERC20)
-        address forwarder; // BalanceForwarder (dynamic-amount bridge to the depository)
+        address forwarder; // SplitForwarder (dynamic-amount + split periphery)
         address receiver; // whitelisted Layerswap receiver
         address feeRecipient; // fee EOA
         address executor; // relayer's Calibur account (gasless mode)
@@ -144,7 +141,6 @@ abstract contract FlowBase is Script {
         c.router = vm.envOr("UNIVERSAL_ROUTER", DEFAULT_ROUTER);
         c.quoter = vm.envOr("UNISWAP_QUOTER", DEFAULT_QUOTER);
         c.permit2 = vm.envOr("PERMIT2", DEFAULT_PERMIT2);
-        c.multicall3 = vm.envOr("MULTICALL3", DEFAULT_MULTICALL3);
         c.depository = vm.envAddress("LAYERSWAP_DEPOSITORY");
         c.forwarder = vm.envOr("DEPOSIT_FORWARDER", address(0));
         c.receiver = vm.envAddress("DEPOSIT_RECEIVER");

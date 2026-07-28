@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
 
-import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
+import {FlowBase, Call, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.sol";
 
 /// @title Flow3 — user → swap venue → SplitForwarder splits the OUTPUT:
 ///        [value to USER + fee → EOA]
@@ -13,7 +13,8 @@ import {FlowBase, Call, IMulticall3, IERC20, Leg, TokenSplit, console2} from "./
 /// Settler included) plugs in unchanged.
 ///
 ///   FUNDING_MODE=gasless     relayer Calibur batch; user signs EIP-3009 only
-///   FUNDING_MODE=user-erc20  ONE user tx: Multicall3 + in-batch EIP-2612 permit
+///   FUNDING_MODE=user-erc20  ONE user tx: SF.runWithPermit (Permit2 witness
+///                            binds the whole plan -> public-mempool-safe, no MEV assumption)
 ///                            (mainnet: MEV-protected submission REQUIRED —
 ///                            note this replaced the router-only shape when the
 ///                            split moved out of the venue)
