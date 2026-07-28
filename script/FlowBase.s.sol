@@ -130,6 +130,14 @@ abstract contract FlowBase is Script {
         modeOverride = m;
     }
 
+    /// @dev Test hook mirroring setMode for the ERC20_AUTH selector (permit2 |
+    ///      2612), so parallel fork tests don't race on the process-global env.
+    string internal erc20AuthOverride;
+
+    function setErc20Auth(string memory a) external {
+        erc20AuthOverride = a;
+    }
+
     function _loadCfg() internal view returns (Cfg memory c, uint256 broadcasterPk, uint256 userPk) {
         userPk = vm.envUint("USER_PRIVATE_KEY");
         c.mode = bytes(modeOverride).length != 0 ? modeOverride : vm.envOr("FUNDING_MODE", MODE_GASLESS);
@@ -427,6 +435,19 @@ abstract contract FlowBase is Script {
     ///      so the pending tx is PUBLIC-MEMPOOL-SAFE: a front-runner can only
     ///      execute this exact payout plan (paying the user's gas). One-time
     ///      prerequisite: user has approved Permit2 for the token.
+    /// @dev Dispatch the user-sent ERC-20 pull by ERC20_AUTH:
+    ///      "permit2" (default, witness-bound, any token after approve(Permit2))
+    ///      or "2612" (native EIP-2612 permit, NO Permit2, permit-tokens only).
+    function _submitUserErc20(Cfg memory c, uint256 userPk, uint256 amount, TokenSplit[] memory splits) internal {
+        string memory auth =
+            bytes(erc20AuthOverride).length != 0 ? erc20AuthOverride : vm.envOr("ERC20_AUTH", string("permit2"));
+        if (_is(auth, string("2612"))) {
+            _submitSfPermitAndRun(c, userPk, amount, splits);
+        } else {
+            _submitSfRunWithPermit(c, userPk, amount, splits);
+        }
+    }
+
     function _submitSfRunWithPermit(Cfg memory c, uint256 userPk, uint256 amount, TokenSplit[] memory splits)
         internal
     {
@@ -441,6 +462,19 @@ abstract contract FlowBase is Script {
 
         vm.startBroadcast(userPk);
         SplitForwarder(payable(c.forwarder)).runWithPermit(permit, c.user, splits, sig);
+        vm.stopBroadcast();
+    }
+
+    /// @dev EIP-2612 self-submit: no Permit2, no approve. Signs permit(user, SF,
+    ///      amount) and the user calls permitAndRun directly (owner forced to
+    ///      msg.sender ⇒ mempool-safe without a witness).
+    function _submitSfPermitAndRun(Cfg memory c, uint256 userPk, uint256 amount, TokenSplit[] memory splits)
+        internal
+    {
+        uint256 deadline = block.timestamp + 10 minutes;
+        (uint8 v, bytes32 r, bytes32 s) = _sign2612(c, userPk, c.forwarder, amount, deadline);
+        vm.startBroadcast(userPk);
+        SplitForwarder(payable(c.forwarder)).permitAndRun(c.usdc, amount, deadline, v, r, s, splits);
         vm.stopBroadcast();
     }
 

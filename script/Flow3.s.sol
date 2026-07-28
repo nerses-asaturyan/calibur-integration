@@ -13,11 +13,10 @@ import {FlowBase, Call, IERC20, Leg, TokenSplit, console2} from "./FlowBase.s.so
 /// Settler included) plugs in unchanged.
 ///
 ///   FUNDING_MODE=gasless     relayer Calibur batch; user signs EIP-3009 only
-///   FUNDING_MODE=user-erc20  ONE user tx: SF.runWithPermit (Permit2 witness
-///                            binds the whole plan -> public-mempool-safe, no MEV assumption)
-///                            (mainnet: MEV-protected submission REQUIRED —
-///                            note this replaced the router-only shape when the
-///                            split moved out of the venue)
+///   FUNDING_MODE=user-erc20  ONE user tx. ERC20_AUTH=permit2 (default,
+///                            SF.runWithPermit, any token after approve(Permit2))
+///                            or ERC20_AUTH=2612 (SF.permitAndRun, no Permit2,
+///                            permit-tokens only). Both public-mempool-safe.
 ///   FUNDING_MODE=user-eth    ONE user tx, DIRECTLY to SplitForwarder.run{value}
 contract Flow3Script is FlowBase {
     function run() external {
@@ -80,7 +79,7 @@ contract Flow3Script is FlowBase {
         });
         splits[1] = _outSplit(c, c.weth)[0];
 
-        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
+        _submitUserErc20(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: split 1 (native) = 100% router hook (wrap + swap

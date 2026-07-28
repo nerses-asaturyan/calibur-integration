@@ -13,6 +13,7 @@ import {BonusPermit2FlowScript} from "../script/BonusPermit2Flow.s.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
 import {SplitForwarder, Leg, TokenSplit} from "../src/SplitForwarder.sol";
 import {IPermit2} from "../src/interfaces/IPermit2.sol";
+import {IERC20Permit} from "../src/interfaces/IERC20Permit.sol";
 import {NativeDepositDemoScript} from "../script/NativeDepositDemo.s.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {ILayerswapDepository} from "../src/interfaces/ILayerswapDepository.sol";
@@ -288,6 +289,75 @@ contract FlowsSepoliaForkTest is Test {
         assertEq(feeEoa.balance, AMOUNT_ETH * FEE_BPS / 10_000, "exact native fee");
         assertGt(IERC20(USDC).balanceOf(receiver) - receiverBefore, 0, "receiver got FULL USDC output");
         _assertNoDust();
+    }
+
+    // --------------------------------------------------------------------- //
+    //   EIP-2612 user-sent (permitAndRun): NO Permit2, NO approve            //
+    // --------------------------------------------------------------------- //
+
+    /// @dev Flow 1 & 4 driven with ERC20_AUTH=2612 — the user never approves
+    ///      Permit2; USDC's native permit is consumed inside SF.permitAndRun.
+    function testFork_Flow1_UserErc20_2612() public onlyFork {
+        Flow1Script f = new Flow1Script();
+        f.setMode("user-erc20");
+        f.setErc20Auth("2612");
+        // NOTE: deliberately NO _approvePermit2() — proving the path needs none.
+        uint256 receiverBefore = IERC20(WETH).balanceOf(receiver);
+        f.run();
+        assertEq(IERC20(USDC).balanceOf(user), 90_000_000, "user paid exactly 10 USDC");
+        assertGt(IERC20(WETH).balanceOf(receiver) - receiverBefore, 0, "receiver got FULL WETH output (2612 path)");
+        assertEq(IERC20(USDC).allowance(user, PERMIT2), 0, "Permit2 never approved");
+        _assertNoDust();
+    }
+
+    function testFork_Flow4_UserErc20_2612() public onlyFork {
+        Flow4Script f = new Flow4Script();
+        f.setMode("user-erc20");
+        f.setErc20Auth("2612");
+        uint256 receiverBefore = IERC20(WETH).balanceOf(receiver);
+        f.run();
+        assertEq(IERC20(USDC).balanceOf(feeEoa), AMOUNT_IN * FEE_BPS / 10_000, "exact fee (2612 path)");
+        assertGt(IERC20(WETH).balanceOf(receiver) - receiverBefore, 0, "receiver got FULL WETH output");
+        _assertNoDust();
+    }
+
+    /// @dev permitAndRun binds by owner = msg.sender: an attacker who lifts the
+    ///      user's 2612 signature from the mempool cannot pull the USER's funds.
+    ///      Calling with the user's (v,r,s): the permit recovers to the user
+    ///      (≠ attacker) — caught — then transferFrom pulls from the ATTACKER,
+    ///      who has nothing/hasn't approved → revert. User untouched.
+    function testFork_Permit2612_ReplayCannotDrainUser() public onlyFork {
+        address attacker = makeAddr("attacker2612");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        // User signs permit(user, SF, value) — the exact sig a mempool bot sees.
+        (uint8 v, bytes32 r, bytes32 s) =
+            _sign2612ForSF(userPk, user, address(forwarder), AMOUNT_IN, deadline);
+
+        // Minimal honest splits (100% USDC -> feeEoa) just to have a valid array.
+        TokenSplit[] memory splits = new TokenSplit[](1);
+        Leg[] memory legs = new Leg[](1);
+        legs[0] = Leg({target: feeEoa, shareBps: 10_000, amountOffset: type(uint256).max, data: ""});
+        splits[0] = TokenSplit({token: USDC, legs: legs});
+
+        vm.prank(attacker);
+        vm.expectRevert(); // transferFrom(attacker,...) has no balance/allowance
+        forwarder.permitAndRun(USDC, AMOUNT_IN, deadline, v, r, s, splits);
+
+        assertEq(IERC20(USDC).balanceOf(user), 100_000_000, "user funds untouched by replay");
+    }
+
+    function _sign2612ForSF(uint256 pk, address owner, address spender, uint256 value, uint256 deadline)
+        internal
+        view
+        returns (uint8 v, bytes32 r, bytes32 s)
+    {
+        bytes32 permitTypehash =
+            keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+        uint256 nonce = IERC20Permit(USDC).nonces(owner);
+        bytes32 structHash = keccak256(abi.encode(permitTypehash, owner, spender, value, nonce, deadline));
+        bytes32 digest = keccak256(abi.encodePacked(hex"1901", IERC20Permit(USDC).DOMAIN_SEPARATOR(), structHash));
+        (v, r, s) = vm.sign(pk, digest);
     }
 
     // --------------------------------------------------------------------- //

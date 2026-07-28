@@ -75,7 +75,7 @@ contract Flow2Script is FlowBase {
             legs: _legs3(inSplit[0].legs[0], inSplit[0].legs[1], _callOnlyLeg(c.router, routerData))
         });
 
-        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
+        _submitUserErc20(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: native split = [exact fee -> EOA plain, rest ->

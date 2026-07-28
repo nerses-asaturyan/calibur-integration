@@ -246,6 +246,29 @@ msg.value** → `Deposited(id, address(0), receiver, amount)`:
 Audited after all 13: SplitForwarder and router at **exactly 0** in
 ETH/USDC/WETH.
 
+## Add-on: EIP-2612 self-submit (`permitAndRun`) — no Permit2, no approve
+
+For **permit-capable tokens in the with-gas (user-pays) mode**, `permitAndRun`
+removes the one-time `approve(Permit2)` entirely: the user signs a native
+EIP-2612 `permit(user, SF, value)` and calls
+`SF.permitAndRun(token, value, deadline, v, r, s, splits)` directly.
+
+Safe on a public mempool **without a witness** — the binding is structural:
+the pull is `transferFrom(msg.sender, …)`, so the permit owner is forced to the
+caller. A replayer calling with the user's signature does `permit(attacker, …)`
+(fails to recover the user's sig → caught), then pulls from *themselves*. Proven:
+`testFork_Permit2612_ReplayCannotDrainUser`.
+
+Selected with `ERC20_AUTH=2612` (default `permit2`). Proven on Sepolia
+(sender = the payer, USDC's native permit, Permit2 never touched):
+
+| Flow | user-erc20 · `ERC20_AUTH=2612` |
+|---|---|
+| **1** all → swap → deposit | [`0x80a7637b…`](https://sepolia.etherscan.io/tx/0x80a7637b50af0a4065c261fa5f5ec4a62689ea7442e6de11a7e8d1f81d3e23fe) 255,308 |
+| **4** fee → EOA + swap → deposit | [`0xeff12e65…`](https://sepolia.etherscan.io/tx/0xeff12e65b4ec19f98ef51df07c800c2b7365adf7e8a9d2020d5147f6e6e953e4) 269,810 |
+
+(Direct `SF.permitAndRun` calls — selector `0x4fe50e40`; SF ends at 0.)
+
 ## Gas — the price of venue independence
 
 user-erc20 and user-eth are now ONE self-contained tx each (no Multicall3, no

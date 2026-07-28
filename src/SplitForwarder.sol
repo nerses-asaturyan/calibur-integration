@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {IPermit2} from "./interfaces/IPermit2.sol";
+import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 
 /// @notice One payout leg of a token split. `data.length == 0` => plain
 ///         transfer of the leg's amount to `target` (ERC-20 safeTransfer or
@@ -114,6 +115,44 @@ contract SplitForwarder {
             WITNESS_TYPESTRING,
             signature
         );
+        _runAll(splits);
+    }
+
+    /// @notice USER-SENT entry for EIP-2612 tokens — NO Permit2, NO prior
+    ///         approve, NO witness. The user (paying gas) submits this directly:
+    ///         their 2612 permit is consumed here, `value` is pulled from THEM,
+    ///         and their `splits` run.
+    ///
+    ///         PUBLIC-MEMPOOL-SAFE WITHOUT A WITNESS because the binding is
+    ///         structural — the pull is `transferFrom(msg.sender, …)`, so the
+    ///         permit owner is forced to the caller:
+    ///           * a replayer calling with the user's (v,r,s) does
+    ///             `permit(attacker, this, …)`, which fails to recover the
+    ///             user's signature (owner = user ≠ attacker) — caught — then
+    ///             pulls from the ATTACKER, never the user;
+    ///           * submitting the raw permit straight to the token only sets
+    ///             allowance[user][this], and NO function here ever does
+    ///             transferFrom(user, …) for an arbitrary owner (`run`/`_runAll`
+    ///             move only this contract's own balance) — so it is not drainable.
+    ///
+    ///         The permit is wrapped in try/catch (trustless-permit): a griefer
+    ///         who front-runs just the permit consumes the nonce, but the
+    ///         transferFrom still succeeds on the set allowance.
+    ///
+    ///         MUST be called DIRECTLY by the user. Wrapped in another contract
+    ///         (Multicall3, etc.) `msg.sender` is that contract → the permit and
+    ///         pull bind to it; it fails safe (reverts), never drains a third party.
+    function permitAndRun(
+        address token,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        TokenSplit[] calldata splits
+    ) external {
+        try IERC20Permit(token).permit(msg.sender, address(this), value, deadline, v, r, s) {} catch {}
+        IERC20(token).safeTransferFrom(msg.sender, address(this), value);
         _runAll(splits);
     }
 

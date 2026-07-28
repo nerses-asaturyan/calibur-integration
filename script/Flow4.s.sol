@@ -76,7 +76,7 @@ contract Flow4Script is FlowBase {
         });
         splits[1] = depositSplit[0];
 
-        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
+        _submitUserErc20(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: native split = [exact fee -> EOA, rest -> router

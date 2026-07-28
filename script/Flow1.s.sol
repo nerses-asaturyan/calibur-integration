@@ -69,7 +69,7 @@ contract Flow1Script is FlowBase {
         });
         splits[1] = TokenSplit({token: c.weth, legs: _legs1(_depositLeg(c, c.weth, 10_000))});
 
-        _submitSfRunWithPermit(c, userPk, c.amountIn, splits);
+        _submitUserErc20(c, userPk, c.amountIn, splits);
     }
 
     /// @dev ONE direct SF call: split 1 (native) = a 100% router hook that wraps
