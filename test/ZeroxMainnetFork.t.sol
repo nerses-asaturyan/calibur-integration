@@ -90,14 +90,70 @@ contract ZeroxMainnetForkTest is Test {
         console2.log("native surplus swept to user (wei):", user.balance - userEthBefore);
     }
 
+    address internal constant SWAP_ROUTER_02 = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+
+    /// @dev MIXED venue in ONE run(): swap half the USDC via REAL 0x and half
+    ///      via REAL Uniswap (SwapRouter02) — two hook legs, different targets,
+    ///      same transaction. Proves the venues coexist with no conflict.
+    function testFork_MixedVenue_0xAndUniswap_SameRun() public {
+        if (!forked) {
+            vm.skip(true);
+            return;
+        }
+        deal(USDC, address(sf), SELL); // total 100 USDC; 50 to each venue
+        uint256 half = SELL / 2;
+
+        // 0x leg: live quote for 50 USDC, taker = SF.
+        (address ah, bytes memory zeroxData,) = _quoteAmount(address(sf), half);
+
+        // Uniswap leg: SwapRouter02.exactInputSingle(USDC->WETH 0.05%, recipient = SF, amountIn = 50 USDC).
+        bytes memory uniData = abi.encodeWithSelector(
+            bytes4(0x04e45aaf), // exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))
+            USDC, WETH, uint24(500), address(sf), half, uint256(1), uint160(0)
+        );
+
+        // split[0] USDC: leg A (50%) -> 0x hook; leg B (remainder) -> Uniswap hook.
+        Leg[] memory sell = new Leg[](2);
+        sell[0] = Leg({target: ah, shareBps: 5000, amountOffset: NO_SUB, data: zeroxData});
+        sell[1] = Leg({target: SWAP_ROUTER_02, shareBps: 5000, amountOffset: NO_SUB, data: uniData});
+        // split[1] WETH: combined output of BOTH venues -> user.
+        Leg[] memory buy = new Leg[](1);
+        buy[0] = Leg({target: user, shareBps: 10_000, amountOffset: NO_SUB, data: ""});
+        // split[2] native: 0x surplus sweep.
+        Leg[] memory nat = new Leg[](1);
+        nat[0] = Leg({target: user, shareBps: 10_000, amountOffset: NO_SUB, data: ""});
+
+        TokenSplit[] memory splits = new TokenSplit[](3);
+        splits[0] = TokenSplit({token: USDC, legs: sell});
+        splits[1] = TokenSplit({token: WETH, legs: buy});
+        splits[2] = TokenSplit({token: address(0), legs: nat});
+
+        sf.run(splits);
+
+        assertGt(IERC20(WETH).balanceOf(user), 0, "user got WETH from BOTH venues");
+        assertEq(IERC20(USDC).balanceOf(address(sf)), 0, "no USDC dust (both legs pulled)");
+        assertEq(IERC20(WETH).balanceOf(address(sf)), 0, "no WETH dust");
+        assertEq(address(sf).balance, 0, "no native surplus dust");
+        assertEq(IERC20(USDC).allowance(address(sf), ah), 0, "0x allowance reset");
+        assertEq(IERC20(USDC).allowance(address(sf), SWAP_ROUTER_02), 0, "uniswap allowance reset");
+        console2.log("MIXED 0x + Uniswap in one run OK. total WETH to user:", IERC20(WETH).balanceOf(user));
+    }
+
     function _quote(address taker) internal returns (address to, bytes memory data, uint256 minBuy) {
+        return _quoteAmount(taker, SELL);
+    }
+
+    function _quoteAmount(address taker, uint256 amount)
+        internal
+        returns (address to, bytes memory data, uint256 minBuy)
+    {
         string[] memory cmd = new string[](7);
         cmd[0] = "bash";
         cmd[1] = "script/zerox_quote.sh";
         cmd[2] = "1";
         cmd[3] = vm.toString(USDC);
         cmd[4] = vm.toString(WETH);
-        cmd[5] = vm.toString(SELL);
+        cmd[5] = vm.toString(amount);
         cmd[6] = vm.toString(taker);
         bytes memory out = vm.ffi(cmd);
         (to, data, minBuy) = abi.decode(out, (address, bytes, uint256));

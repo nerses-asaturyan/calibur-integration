@@ -310,6 +310,18 @@ genuine 0x integration nuance: **account for possible native surplus.**
 (Skipped automatically in the normal `forge test` — needs `MAINNET_RPC_URL`,
 `--ffi`, and `ZEROX_API_KEY`.)
 
+**Mixed venues in one tx.** `testFork_MixedVenue_0xAndUniswap_SameRun` swaps
+half the USDC through **real 0x** and half through **real Uniswap
+(SwapRouter02)** in a single `run()` — two hook legs, different targets, no
+conflict, combined WETH output split to the user, zero dust. Venues are just
+hook targets, so any mix coexists.
+
+> **Why the hardcoded `PERMIT2` doesn't limit this:** the `PERMIT2` constant is
+> used ONLY by `runWithPermit` (inbound pull). Swap venues — 0x's
+> AllowanceHolder, Uniswap's router — are never constants; they arrive as the
+> `target` of a hook leg (caller-supplied in the splits). So adding/using any
+> venue needs no contract change.
+
 ## Gas — the price of venue independence
 
 user-erc20 and user-eth are now ONE self-contained tx each (no Multicall3, no
