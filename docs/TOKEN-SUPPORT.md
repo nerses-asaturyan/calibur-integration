@@ -1,7 +1,7 @@
-# Token support — what this repo actually implements
+# Token support
 
-Inbound methods that exist in the code today. Nothing aspirational — see
-"Not implemented" at the bottom for what is *not* here.
+Inbound methods implemented in the code today. See "Not implemented" at the
+bottom for what is out of scope.
 
 ## Legend
 - 🟢 no prerequisite — signature only
@@ -47,7 +47,7 @@ No MEV-protected RPC required, on any path:
 Proven: `testFork_Intent_AlteredSplitsReplayReverts` (witness) and
 `testFork_Permit2612_ReplayCannotDrainUser` (2612 owner-binding).
 
-## NOT implemented (discussed, not in code)
+## Not implemented
 - **Native-2612 *gasless* leg** — EIP-2612 tokens still route through Permit2 in
   gasless mode. Only the *with-gas* 2612 path (`permitAndRun`) exists.
 - **User-side EIP-7702** — would remove all per-token prerequisites. Not used

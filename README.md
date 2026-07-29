@@ -86,7 +86,7 @@ hardcoded constant). Proven on Ethereum-mainnet forks with **no mocks**:
 
 | | Address |
 |---|---|
-| **SplitForwarder** (ours, verified — `runWithPermit` + `permitAndRun`) | [`0x28E815496471724e7DBA95D1a11b014110Cdb2FC`](https://sepolia.etherscan.io/address/0x28E815496471724e7DBA95D1a11b014110Cdb2FC#code) |
+| **SplitForwarder** (deployed, verified — `runWithPermit` + `permitAndRun`) | [`0x28E815496471724e7DBA95D1a11b014110Cdb2FC`](https://sepolia.etherscan.io/address/0x28E815496471724e7DBA95D1a11b014110Cdb2FC#code) |
 | **Layerswap depository** (original, unmodified — deposit target) | [`0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4`](https://sepolia.etherscan.io/address/0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4) |
 | USDC (Circle: EIP-3009 **and** EIP-2612) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
 | Calibur singleton (EIP-7702 target, gasless relayer only) | `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00` |
@@ -186,6 +186,6 @@ independence, and the trust model.
 An earlier, self-contained **alternative approach** lives on the
 `alt/extended-depository-flows` branch: it extends the depository with a
 `depositERC20All` function and drives payouts through the Universal Router's
-`PAY_PORTION`/`SWEEP` commands (Uniswap-coupled). This branch — `SplitForwarder`,
-original depository, venue-independent — is the recommended shape;
+`PAY_PORTION`/`SWEEP` commands (Uniswap-coupled). The approach here —
+`SplitForwarder`, original depository, venue-independent — is the recommended one;
 [ARCHITECTURE.md](ARCHITECTURE.md) includes the trade-off comparison.

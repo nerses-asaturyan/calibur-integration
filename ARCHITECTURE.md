@@ -1,13 +1,13 @@
 # Architecture
 
-**Thesis, proven on-chain (13 Sepolia txs + real-venue mainnet-fork proofs):**
+**Proven on-chain** — 13 Sepolia transactions plus real-venue mainnet-fork tests:
 a user's funds are pulled (gaslessly by signature, or by the user's own tx),
 optionally swapped through **any venue that delivers output to an address**, then
 split and deposited into the **original, unmodified Layerswap depository** — all
 in one atomic transaction, with zero dust and no MEV-protected-RPC requirement.
 The only custom code is one stateless periphery contract, `SplitForwarder`.
 
-## Design principles (fixed by decision)
+## Design principles
 
 1. **The user is always a plain EOA** — never EIP-7702-delegated. Only the
    relayer's executor is a Calibur smart account (gasless mode only).
@@ -58,10 +58,10 @@ function permitAndRun(address token, uint256 value, uint256 deadline,
 - **Trust model = a router**: stateless, no owner, permissionless — funds are
   never parked in it across transactions.
 
-### Terminal-invariant scope (audit note)
+### Terminal-invariant scope
 The zero-balance check covers every token **named** in `splits` plus native ETH.
 A hook that produces a token *not named* in the plan would leave it in the
-forwarder, permissionlessly claimable (finding I-01). A normal swap outputs
+forwarder, permissionlessly claimable. A normal swap outputs
 exactly the buy token, which the plan names — so this doesn't arise in these
 flows; the rule is simply "name every token a hook can output."
 
@@ -225,7 +225,7 @@ An earlier, self-contained approach is preserved on the
 `depositERC20All` function (whole-balance forward, read at run time) and drives
 payouts through the Universal Router's `PAY_PORTION`/`SWEEP` commands.
 
-| | Alternative (`depositERC20All` + UR commands) | This branch (`SplitForwarder`) |
+| | Alternative (`depositERC20All` + UR commands) | This approach (`SplitForwarder`) |
 |---|---|---|
 | Depository | modified / redeployed | **100% original** |
 | Venue coupling | splits depend on UR `PAY_PORTION`/`SWEEP` | **any venue that delivers to an address (0x-ready)** |
@@ -237,12 +237,12 @@ payouts through the Universal Router's `PAY_PORTION`/`SWEEP` commands.
 | Custom code | 1 function in the depository | 1 standalone ~230-line contract |
 
 **Recommendation:** if any non-Uniswap venue is on the roadmap or the depository
-must stay untouched, this branch is the shape to ship — you pay ~+15–45k gas per
+must stay untouched, this is the approach to ship — it costs ~+15–45k gas per
 flow; in exchange the payout logic lives in one periphery contract, the venue is
 a plug-in, native dynamic deposits work, and user-sent ERC-20 flows need no
 MEV-protected submission.
 
-## Hard limits (protocol-level, by design)
+## Hard limits
 
 1. **Gasless native ETH inbound is impossible** for a plain EOA — no signature
    moves ETH. User-sent is the native path (proven).

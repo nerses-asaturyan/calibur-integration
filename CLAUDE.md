@@ -77,7 +77,7 @@ Selectors: `FUNDING_MODE = gasless | user-erc20 | user-eth`; for user-erc20,
   named in `splits`) **and always native**; the last leg of each split takes the
   arithmetic remainder. If you add a hook that can output a token, that token
   **must** be named in the plan or the tx reverts (`BalanceNotConsumed`) — and if
-  it's *not* named it would be strandable (audit finding I-01).
+  it's *not* named it would be left strandable in the forwarder.
 - **Bips per split sum to exactly 10000**, or revert.
 - **Intent-binding / mempool safety:** `runWithPermit` binds the whole plan via a
   Permit2 witness; `permitAndRun` binds `owner = msg.sender`. Never introduce a
@@ -91,7 +91,7 @@ Selectors: `FUNDING_MODE = gasless | user-erc20 | user-eth`; for user-erc20,
 
 ## Key Sepolia addresses
 
-- SplitForwarder (ours, verified): `0x28E815496471724e7DBA95D1a11b014110Cdb2FC`
+- SplitForwarder (deployed, verified): `0x28E815496471724e7DBA95D1a11b014110Cdb2FC`
 - Layerswap depository (original, deposit target): `0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4`
 - USDC (EIP-3009 + EIP-2612): `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
 - Calibur singleton (EIP-7702, gasless relayer only): `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00`

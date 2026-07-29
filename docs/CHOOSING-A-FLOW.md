@@ -48,13 +48,13 @@ gas sponsored?
 
 ## Why each is safe (no MEV RPC required)
 - **EIP-3009 / Permit2 SignatureTransfer (gasless):** signature binds
-  `spender = executor` — only our relayer can redeem it.
+  `spender = executor` — only the relayer can redeem it.
 - **`runWithPermit` (Permit2 witness):** signature binds a witness over the
   entire payout plan — a replayer can only execute the user's intent.
 - **`permitAndRun` (EIP-2612):** pull is `transferFrom(msg.sender, …)`, so a
   replayer can only pull their own funds.
 
-## Hard limits (not fixable without relaxing a rule)
+## Hard limits
 - **Gasless native ETH** — impossible; nothing moves ETH by signature.
 - **Plain tokens with zero prerequisite** — impossible; a plain token needs one
   `approve` (mildest form: the shared Permit2 approve).
@@ -62,5 +62,5 @@ gas sponsored?
 
 > To erase the remaining approve for plain tokens entirely, the only lever is
 > **user-side EIP-7702** (one account delegation → every token, both modes, no
-> per-token setup). It's not enabled here — it trades a per-token approve for
+> per-token setup). It is not used here — it trades a per-token approve for
 > account-level trust. See [ARCHITECTURE.md](../ARCHITECTURE.md).
