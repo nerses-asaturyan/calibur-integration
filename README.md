@@ -9,7 +9,7 @@ Four payment flows × three funding modes = **12 proven on-chain transactions**
   relayer's executor) exits every transaction at exactly 0;
 - **exact-in swaps only** — the user sends what they want; quoted floors are
   slippage *revert guards*, never amount-shapers;
-- **no orchestration contracts** — the only contract of ours is the
+- **no orchestration contracts** — the only custom contract is the
   [LayerswapDepository](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code)
   (original Layerswap contract + one added function, `depositERC20All`, which
   forwards the **caller's whole balance read at run time** — the primitive that
@@ -41,7 +41,7 @@ bips works), ERC-20 flows swap USDC→WETH, ETH flows wrap and swap WETH→USDC.
 |---|---|
 | USDC (Circle: EIP-3009 **and** EIP-2612) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
 | Calibur singleton (EIP-7702 target) | `0x000000009B1D0aF20D8C6d0A44e162d11F9b8f00` |
-| **LayerswapDepository (ours, verified, `depositERC20All`)** | [`0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8`](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code) |
+| **LayerswapDepository (deployed, verified, `depositERC20All`)** | [`0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8`](https://sepolia.etherscan.io/address/0x4fFFC89c52dD080d1eEEc3Ccd546602c0f1720E8#code) |
 | Uniswap Universal Router | `0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b` |
 | Uniswap QuoterV2 (off-chain floors) | `0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3` |
 | Permit2 (canonical) | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
@@ -66,7 +66,7 @@ even standing approvals have nothing to drain.
 **`gasless`** — the user signs one off-chain authorization; the relayer's
 Calibur account runs an atomic ERC-7821 batch and pays all gas. Inbound per
 token type: **USDC** → EIP-3009 `receiveWithAuthorization` (bound to
-`msg.sender == to` = our executor); **EIP-2612 tokens** → permit +
+`msg.sender == to` = the executor); **EIP-2612 tokens** → permit +
 transferFrom; **any plain token** → Permit2 `permitTransferFrom` with
 **spender = executor** (one-time `approve(Permit2)` tx per token, then
 signature-only forever — see the bonus tx).
@@ -84,7 +84,7 @@ front-run/replayed permit (nonce grief) cannot brick the batch.
 
 **`user-eth`** — the user sends ONE tx with native ETH (nothing can pull ETH
 from a plain EOA by signature, so gasless native inbound doesn't exist —
-that's a protocol fact, not a design gap). Flows 2 & 3: router-only
+a protocol fact). Flows 2 & 3: router-only
 (`msg.value` → fee `TRANSFER` → `WRAP_ETH` → swap). Flows 1 & 4: Multicall3
 value-legs.
 
@@ -109,7 +109,7 @@ the input, then the Flow-1 tail: the full dynamic output is deposited.
 
 ## Security notes
 
-- **EIP-3009 checklist (gasless):** only accept signatures whose `to` is your
+- **EIP-3009 checklist (gasless):** only accept signatures whose `to` is the
   executor; use `receiveWithAuthorization` (enforces `msg.sender == to`);
   verify recovery against USDC's live `DOMAIN_SEPARATOR()`; check
   `authorizationState` (single-use nonce); dry-run the batch before
@@ -171,7 +171,7 @@ src/interfaces/*                     # IERC7821(+Call), IERC20, IERC3009USDC, IE
 script/FlowBase.s.sol                # shared: config, signing (3009/2612/Permit2), program builders
 script/Flow1.s.sol .. Flow4.s.sol    # the matrix (FUNDING_MODE selects the cell)
 script/BonusPermit2Flow.s.sol        # plain-token gasless inbound (Permit2)
-script/DeployDepository.s.sol        # deploy + whitelist our depository
+script/DeployDepository.s.sol        # deploy + whitelist the depository
 script/EnableDelegation.s.sol        # EIP-7702 enable (relayer -> Calibur)
 script/DisableDelegation.s.sol       # EIP-7702 disable
 script/ApproveDepository.s.sol       # optional: cheaper 2-call base batch
@@ -189,6 +189,6 @@ router-native swap chains with floor-based deposits (`0x74fb71b5…`,
 `0xbf22f0ad…`), zero-dust v2 flows incl. a real Aave v3 supply/withdraw
 sandwich (`0x95378e76…`, `0x20c49f67…`), native dual-EOA payouts
 (`0xa50e86d8…`), a generic N-way splitter contract (`0xf3fe4ee3…`, since
-removed by design decision), and the first user-invoked Multicall3 flow
+since removed), and the first user-invoked Multicall3 flow
 (`0x21f1a9d2…`). See git history for the full evolution; the matrix above
 supersedes all of them.

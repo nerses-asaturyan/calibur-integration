@@ -1,12 +1,12 @@
 # Architecture — the final flow matrix
 
-**Thesis, proven on-chain (13 Sepolia txs, table in the README):** users fund
+**Proven on-chain** — 13 Sepolia transactions (table in the README): users fund
 payment flows in ERC-20 (gaslessly, by signature) or in ERC-20/native ETH
 (sending one tx themselves); one atomic transaction runs exact-in Uniswap
 swaps and pays out to EOAs and/or the Layerswap depository — with zero dust
 and no orchestration contracts.
 
-## Design principles (fixed by decision)
+## Design principles
 
 1. **The user is always a plain EOA** — never EIP-7702-delegated. Only the
    relayer's executor is a Calibur smart account.
@@ -15,7 +15,7 @@ and no orchestration contracts.
 3. **Zero dust** — every intermediary (router, Multicall3, executor) exits
    every tx at 0. Dynamic-amount exits do the work: swap-recipient targeting,
    `PAY_PORTION`/`SWEEP`, and `depositERC20All` (whole-balance, run-time read —
-   the one function we added to the original Layerswap depository, and the only
+   the one function added to the original Layerswap depository, and the only
    custom code in the system).
 4. **Public infrastructure over new contracts** — Universal Router (swaps +
    payment commands), Permit2 (signature pulls), Multicall3 (user-sent
@@ -59,7 +59,7 @@ Flows: **1** all→swap→depository · **2** exact fee→EOA, rest→swap→use
 - **Relayer liveness** (gasless): a signature is worthless without a
   broadcaster; run redundant relayers.
 
-## Hard limits (protocol-level, by design)
+## Hard limits
 
 1. **Gasless native ETH inbound is impossible** for a plain EOA — no signature
    can move ETH. User-sent is the native path (proven).
@@ -68,7 +68,7 @@ Flows: **1** all→swap→depository · **2** exact fee→EOA, rest→swap→use
    day one.
 3. **User-sent ERC-20 + depository in one PUBLIC-mempool tx** — unsafe; the
    private-submission requirement is irreducible without new contracts or
-   user-side 7702 (both banned).
+   user-side 7702 (neither is used here).
 
 ## Aggregator slot (0x etc., skipped for now)
 
