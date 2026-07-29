@@ -320,6 +320,31 @@ hook targets, so any mix coexists.
 > `target` of a hook leg (caller-supplied in the splits). So adding/using any
 > venue needs no contract change.
 
+## Fly (Magpie) venue — proven against the REAL router (Ethereum mainnet fork)
+
+Same approach as 0x, second venue: `test/FlyMainnetFork.t.sol` forks Ethereum
+mainnet and swaps **100 USDC → WETH through the real MagpieRouterV3**
+(`0x20F6…860c`) using a **live Fly Swap API** quote (`script/fly_quote.sh`,
+`/aggregator/quote/transaction`, taker = the forked SF), then splits the actual
+output 12.34% fee / remainder. SF hook = `approve(router) → call(swapWithMagpieSignature)`.
+No SF change (venue = hook target). Run:
+
+```bash
+export MAINNET_RPC_URL=https://ethereum-rpc.publicnode.com
+forge test --ffi --match-contract FlyMainnetFork -vv
+```
+
+Two notes from doing it:
+- **Fly's quote is keyless** (`/aggregator/*` needs no API key) — unlike 0x.
+- **Correction to the earlier 0x "native surplus" claim:** with SF's native
+  balance zeroed in `setUp`, the Fly run leaves **zero** native — proving the
+  tiny native leftover previously seen (identical `577021548053172` wei in both
+  the 0x and Fly runs) was a **fork address-collision balance** at the freshly
+  deployed SF address, *not* swap surplus / positive slippage. The Fly test
+  zeroes SF and needs no native sweep leg. (The 0x test still carries a harmless
+  sweep leg; it will be corrected on the next 0x-key re-auth — the free key was
+  rate-limited during this pass. Fly, being keyless, was unaffected.)
+
 ## Gas — the price of venue independence
 
 user-erc20 and user-eth are now ONE self-contained tx each (no Multicall3, no
