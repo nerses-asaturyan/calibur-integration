@@ -5,7 +5,7 @@
 
 # ---- Local tooling (not for GitHub) ----
 .claude/
-CLAUDE.md
+# CLAUDE.md is tracked — it is the repo guide for Claude Code sessions.
 
 # ---- Foundry build artifacts ----
 /out/

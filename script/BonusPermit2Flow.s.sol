@@ -15,8 +15,9 @@ import {FlowBase, Call, IPermit2, console2} from "./FlowBase.s.sol";
 ///
 /// Atomic Calibur batch (relayer pays):
 ///   1. permit2.permitTransferFrom(user -> router, X WETH)   // gasless inbound
-///   2. router: swap WETH -> USDC (exact-in), paid to the executor
-///   3. approve(max) -> depositERC20All(USDC) -> approve(0)  // full dynamic output
+///   2. router: swap WETH -> USDC (exact-in), paid to the SplitForwarder
+///   3. SF.run([{USDC: 100% hook -> depositERC20(id, USDC, receiver, ▸amount◂)}])
+///        // full dynamic output deposited into the ORIGINAL depository
 ///
 /// Usage (after one-time WETH.approve(Permit2)):
 ///   forge script script/BonusPermit2Flow.s.sol:BonusPermit2FlowScript \
@@ -26,7 +27,7 @@ contract BonusPermit2FlowScript is FlowBase {
         (Cfg memory c,, uint256 userPk) = _loadCfg();
         uint256 relayerPk = vm.envUint("PRIVATE_KEY");
         uint256 amount = vm.envOr("AMOUNT_WETH", uint256(0.001 ether));
-        _logHeader(c, "Bonus: PLAIN token (WETH) gasless via Permit2 -> swap -> depositERC20All");
+        _logHeader(c, "Bonus: PLAIN token (WETH) gasless via Permit2 -> swap -> SF deposit");
         _preflight(c, true);
 
         uint256 minOut = _floor(c, _quote(c, c.weth, c.usdc, amount));

@@ -4,10 +4,10 @@ pragma solidity ^0.8.29;
 import {FlowBase, Call, IERC20, TokenSplit, console2} from "./FlowBase.s.sol";
 
 /// @title NativeDepositDemo — dynamic-amount NATIVE deposit into the ORIGINAL
-///        depository: the capability `depositERC20All` fundamentally cannot
-///        offer (native amounts must ride as msg.value, and no contract can
-///        pull ETH from its caller — the fix has to live on the caller side,
-///        which is exactly what the SplitForwarder is).
+///        depository: a capability any depository-side whole-balance sweep
+///        fundamentally cannot offer (native amounts must ride as msg.value, and
+///        no contract can pull ETH from its caller — the fix has to live on the
+///        caller side, which is exactly what the SplitForwarder is).
 ///
 /// Gasless Calibur batch (user signs EIP-3009 only):
 ///   1. USDC.receiveWithAuthorization(user -> executor)

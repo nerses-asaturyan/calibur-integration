@@ -1,7 +1,7 @@
-# Token support — what this branch actually implements
+# Token support — what this repo actually implements
 
-Inbound methods that exist in the code today (`experiment/deposit-forwarder`).
-Nothing aspirational — see "Not implemented" at the bottom for what is *not* here.
+Inbound methods that exist in the code today. Nothing aspirational — see
+"Not implemented" at the bottom for what is *not* here.
 
 ## Legend
 - 🟢 no prerequisite — signature only

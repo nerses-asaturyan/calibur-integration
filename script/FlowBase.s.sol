@@ -197,7 +197,7 @@ abstract contract FlowBase is Script {
         }
         uint256 priorDust = IERC20(_depositToken(c)).balanceOf(_collector(c));
         if (priorDust > 0 && touchesDepository) {
-            console2.log("NOTE: collector holds pre-existing deposit-token balance; depositERC20All sweeps it in:", priorDust);
+            console2.log("NOTE: collector holds pre-existing deposit-token balance; the SF deposit hook forwards it too:", priorDust);
         }
     }
 
@@ -216,9 +216,9 @@ abstract contract FlowBase is Script {
     }
 
     /// @dev Who accumulates the swap output before the deposit: always the
-    ///      BalanceForwarder — the router pays it directly, and its
-    ///      executeWithBalance bridges the dynamic amount into the ORIGINAL
-    ///      depository's exact-amount depositERC20.
+    ///      SplitForwarder — the router pays it directly, and its `run` hook
+    ///      bridges the dynamic amount into the ORIGINAL depository's
+    ///      exact-amount depositERC20 (amount patched at run time).
     function _collector(Cfg memory c) internal pure returns (address) {
         return c.forwarder;
     }
@@ -263,8 +263,11 @@ abstract contract FlowBase is Script {
         (v, r, s) = vm.sign(userPk, digest);
     }
 
-    /// @dev EIP-2612 permit over USDC (user-sent ERC-20 depository flows;
-    ///      spender = Multicall3, consumed in the user's own batch).
+    /// @dev EIP-2612 permit over USDC (user-sent ERC-20 flows via `permitAndRun`;
+    ///      spender = the SplitForwarder, consumed in the user's own direct call.
+    ///      Front-run-safe without a witness: the pull is
+    ///      transferFrom(msg.sender, ...), so the permit owner is forced to the
+    ///      caller — a replayer can only pull from themselves).
     function _sign2612(Cfg memory c, uint256 userPk, address spender, uint256 value, uint256 deadline)
         internal
         view
@@ -549,7 +552,7 @@ abstract contract FlowBase is Script {
         console2.log("  FUNDING_MODE:", c.mode);
         console2.log("  user (payer):", c.user);
         console2.log("  fee recipient:", c.feeRecipient);
-        console2.log("  depository (depositERC20All):", c.depository);
+        console2.log("  depository (depositERC20):", c.depository);
         console2.log("  receiver:", c.receiver);
         console2.log("  fee bps:", c.feeBps);
         console2.log("--------------------------------------------------");

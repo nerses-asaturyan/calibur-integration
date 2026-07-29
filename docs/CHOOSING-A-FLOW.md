@@ -63,4 +63,4 @@ gas sponsored?
 > To erase the remaining approve for plain tokens entirely, the only lever is
 > **user-side EIP-7702** (one account delegation → every token, both modes, no
 > per-token setup). It's not enabled here — it trades a per-token approve for
-> account-level trust. See EXPERIMENT.md.
+> account-level trust. See [ARCHITECTURE.md](../ARCHITECTURE.md).

@@ -31,8 +31,7 @@ contract FlowsSepoliaForkTest is Test {
     address internal constant WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
     address internal constant ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-    address internal constant MULTICALL3 = 0xcA11bde05977b3631167028862bE2a173976CA11;
-    // EXPERIMENT: the ORIGINAL depository (no depositERC20All) + BalanceForwarder.
+    // The ORIGINAL, unmodified depository (no depositERC20All); driven by the SplitForwarder.
     address internal constant DEPOSITORY = 0xbc519fde36D45bF402d6FF40D4968AAf2ad3D0b4;
 
     uint256 internal constant AMOUNT_IN = 10_000_000; // 10 USDC
