@@ -13,9 +13,10 @@ Every flow shares the same guarantees:
 
 - **atomic** — one transaction; any leg reverting rolls back everything (a
   gasless user's signature nonce is never consumed on failure);
-- **zero dust** — the forwarder asserts a per-token (and always-native) terminal
-  zero-balance, and the last split leg takes the arithmetic remainder, so nothing
-  can be stranded;
+- **zero dust** — the forwarder asserts a per-token terminal zero-balance, plus
+  that no native ETH the call introduced remains (checked against the entry
+  balance, so a force-sent wei can't censor unrelated plans), and the last split
+  leg takes the arithmetic remainder, so nothing can be stranded;
 - **exact-in swaps only** — the user sends what they want; quoted floors are
   slippage *revert guards*, never amount-shapers;
 - **one small contract** — `SplitForwarder` is stateless, ownerless, holds no
@@ -26,12 +27,20 @@ Every flow shares the same guarantees:
 ```solidity
 struct Leg        { address target; uint96 shareBps; uint256 amountOffset; bytes data; }
 struct TokenSplit { address token; Leg[] legs; }        // token = address(0) → native
+struct FlexibleLeg { address target; uint96 shareBps; uint256 amount; uint256 amountOffset; bytes data; }
+struct FlexibleTokenSplit { address token; FlexibleLeg[] legs; }
 
 function run(TokenSplit[] calldata splits) external payable;
 function runWithPermit(IPermit2.PermitTransferFrom permit, address owner,
                        TokenSplit[] calldata splits, bytes calldata sig) external;   // Permit2 witness = keccak256(splits)
 function permitAndRun(address token, uint256 value, uint256 deadline,
                       uint8 v, bytes32 r, bytes32 s, TokenSplit[] calldata splits) external;   // EIP-2612 self-submit
+
+function runFlexible(FlexibleTokenSplit[] calldata splits) external payable;
+function runFlexibleWithPermit(IPermit2.PermitTransferFrom permit, address owner,
+                               FlexibleTokenSplit[] calldata splits, bytes calldata sig) external;   // witness = keccak256(FLEXIBLE_WITNESS_TAG, splits)
+function permitAndRunFlexible(address token, uint256 value, uint256 deadline,
+                              uint8 v, bytes32 r, bytes32 s, FlexibleTokenSplit[] calldata splits) external;
 ```
 
 Splits are processed **sequentially**, so an earlier split's hook (e.g. a swap
@@ -39,6 +48,13 @@ paying the forwarder) can produce the balance a later split distributes. Each
 leg is either a plain transfer (empty `data`) or a **calldata hook** — the leg's
 run-time amount is patched into the template at `amountOffset`
 (`NO_SUBSTITUTION` for native hooks, where the amount rides as `msg.value`).
+The original basis-point legs must total 10,000 bps and give their arithmetic
+remainder to the last paying leg. The flexible path supports fixed amounts and
+bps in one plan: fixed amounts are reserved first, then bps legs split the
+unknown remaining live balance. The final bps leg takes the remainder, so an
+exact fee plus a `10_000`-bps user leg works even when an AMM output is unknown
+while constructing batch calldata. A leg must set exactly one of `amount` or
+`shareBps`; both zero means a call-only hook.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full mechanics and per-flow
 execution shapes.
 
@@ -171,6 +187,8 @@ script/DeploySplitForwarder.s.sol# deploy the forwarder
 script/EnableDelegation.s.sol    # EIP-7702 enable (relayer → Calibur); DisableDelegation.s.sol reverses it
 script/{zerox,fly}_quote.sh      # live venue quotes for the mainnet-fork tests (vm.ffi)
 test/FlowsSepoliaFork.t.sol      # the matrix, end-to-end on real Sepolia state
+test/SplitForwarderAmounts.t.sol # local hybrid amount/bps and compatibility tests
+test/SplitForwarderHardening.t.sol # reentrancy lock, native entry-baseline, zero-pool remainder
 test/ZeroxMainnetFork.t.sol      # real 0x Settler swap (+ mixed 0x/Uniswap)
 test/FlyMainnetFork.t.sol        # real MagpieRouterV3 swap
 test/external/LayerswapDepository.sol  # verbatim copy of the original depository (local test deploy)

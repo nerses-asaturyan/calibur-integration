@@ -60,7 +60,10 @@ Selectors: `FUNDING_MODE = gasless | user-erc20 | user-eth`; for user-erc20,
 
 - **`SplitForwarder`** entrypoints: `run(splits)`, `runWithPermit(permit, owner,
   splits, sig)` (Permit2 witness = `keccak256(abi.encode(splits))`),
-  `permitAndRun(token, value, deadline, v, r, s, splits)` (EIP-2612 self-submit).
+  `permitAndRun(token, value, deadline, v, r, s, splits)` (EIP-2612 self-submit),
+  plus hybrid fixed-amount/remainder counterparts `runFlexible` /
+  `runFlexibleWithPermit` (witness = `keccak256(abi.encode(FLEXIBLE_WITNESS_TAG,
+  splits))`) / `permitAndRunFlexible`. All six are `nonReentrant` (transient lock).
 - **`TokenSplit { token; Leg[] }`**, **`Leg { target; shareBps; amountOffset; data }`**.
   Splits run **sequentially** (an earlier hook can fund a later split). A leg is a
   plain transfer (empty `data`) or a calldata **hook** (amount patched at
@@ -74,11 +77,19 @@ Selectors: `FUNDING_MODE = gasless | user-erc20 | user-eth`; for user-erc20,
 ## Invariants — do not break these
 
 - **Zero dust:** `run` asserts a per-token terminal zero-balance (for every token
-  named in `splits`) **and always native**; the last leg of each split takes the
+  named in `splits`) **and that no native the call introduced remains** — native
+  is checked against the entry balance, not absolute zero, so a force-sent wei
+  can't censor ERC-20-only plans; the last leg of each split takes the
   arithmetic remainder. If you add a hook that can output a token, that token
   **must** be named in the plan or the tx reverts (`BalanceNotConsumed`) — and if
   it's *not* named it would be left strandable in the forwarder.
-- **Bips per split sum to exactly 10000**, or revert.
+- **Bips per split sum to exactly 10000**, or revert (a flexible plan's share
+  legs may instead be entirely absent when only fixed amounts consume the
+  balance; a flexible share leg whose pool share rounds to zero is skipped).
+- **Reentrancy lock:** all six entry points share one transient `nonReentrant`
+  lock (`receive()` stays unlocked for mid-plan ETH). Never add an execution
+  entry point without it — a leg target could otherwise nest a `run()` and
+  consume a later split's balance.
 - **Intent-binding / mempool safety:** `runWithPermit` binds the whole plan via a
   Permit2 witness; `permitAndRun` binds `owner = msg.sender`. Never introduce a
   user-sent path whose signature isn't bound to intent — that reintroduces the

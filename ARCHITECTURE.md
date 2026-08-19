@@ -13,9 +13,11 @@ The only custom code is one stateless periphery contract, `SplitForwarder`.
    relayer's executor is a Calibur smart account (gasless mode only).
 2. **Exact-in swaps only** — the UI lets users send any amount; quoted floors are
    slippage revert-guards, never amount-shapers.
-3. **Zero dust, enforced on-chain** — the forwarder asserts a per-token (and
-   always-native) terminal zero-balance, and the last split leg takes the
-   arithmetic remainder. Nothing can be stranded, or the tx reverts.
+3. **Zero dust, enforced on-chain** — the forwarder asserts a per-token
+   terminal zero-balance, plus that no native ETH the call introduced remains
+   (checked against the entry balance, never absolute zero — so a wei force-sent
+   by a third party can't censor unrelated ERC-20 plans). The last split leg
+   takes the arithmetic remainder. Nothing can be stranded, or the tx reverts.
 4. **The depository stays 100% original** — no custom on-chain deposit function;
    the dynamic-amount work lives in the caller-side forwarder.
 5. **Venue-independent** — the swap is a caller-supplied hook target, not a
@@ -30,12 +32,20 @@ The only custom code is one stateless periphery contract, `SplitForwarder`.
 ```solidity
 struct Leg        { address target; uint96 shareBps; uint256 amountOffset; bytes data; }
 struct TokenSplit { address token; Leg[] legs; }        // token = address(0) → native
+struct FlexibleLeg { address target; uint96 shareBps; uint256 amount; uint256 amountOffset; bytes data; }
+struct FlexibleTokenSplit { address token; FlexibleLeg[] legs; }
 
 function run(TokenSplit[] calldata splits) external payable;
 function runWithPermit(IPermit2.PermitTransferFrom permit, address owner,
                        TokenSplit[] calldata splits, bytes calldata sig) external;
 function permitAndRun(address token, uint256 value, uint256 deadline,
                       uint8 v, bytes32 r, bytes32 s, TokenSplit[] calldata splits) external;
+
+function runFlexible(FlexibleTokenSplit[] calldata splits) external payable;
+function runFlexibleWithPermit(IPermit2.PermitTransferFrom permit, address owner,
+                               FlexibleTokenSplit[] calldata splits, bytes calldata sig) external;
+function permitAndRunFlexible(address token, uint256 value, uint256 deadline,
+                              uint8 v, bytes32 r, bytes32 s, FlexibleTokenSplit[] calldata splits) external;
 ```
 
 - **Several tokens AND native ETH in one call** — splits are processed
@@ -49,17 +59,36 @@ function permitAndRun(address token, uint256 value, uint256 deadline,
   amount (e.g. run `router.execute` after a plain leg pre-funded it).
 - **Bips must sum to exactly 10000** per split or the tx reverts; the **last leg
   takes the arithmetic remainder** (rounding dust impossible); a terminal
-  per-token zero-balance check (`BalanceNotConsumed`), plus an always-checked
-  native balance, guarantees nothing stays behind.
+  per-token zero-balance check (`BalanceNotConsumed`), plus a check that no
+  native the call introduced remains, guarantees nothing stays behind.
+- **Fixed amounts and bps can share one flexible plan**. Fixed amounts are
+  reserved from the live balance first. Flexible bps legs must then total
+  10,000 and split the unknown remainder; the last bps leg receives its
+  arithmetic remainder. This supports an exact fee plus a `10_000`-bps sweep
+  after an AMM output whose amount was unknown when batch calldata was built.
+  Each paying leg sets exactly one of `amount` or `shareBps`; both zero means a
+  call-only hook. The same hook, sequential-processing, atomicity, and terminal
+  zero-balance rules apply.
 - **`runWithPermit`** — intent-bound user entry: Permit2 `permitWitnessTransferFrom`
   with `witness = keccak256(abi.encode(splits))`.
+- **`runFlexibleWithPermit`** applies the same Permit2 witness binding to a
+  hybrid plan, domain-tagged (`witness = keccak256(abi.encode(FLEXIBLE_WITNESS_TAG,
+  splits))`) so legacy and flexible plan signatures can never be replayed across
+  paths; `permitAndRunFlexible` is its EIP-2612 counterpart.
+- **Reentrancy-locked execution** — all six entry points share one transient
+  (EIP-1153) lock, so a leg target called mid-plan cannot nest a permissionless
+  `run()` to consume a balance a later split was going to distribute. The lock
+  auto-clears at the end of the tx, so the contract stays stateless at rest
+  (`receive()` is deliberately unlocked — hooks legitimately pay ETH in mid-plan).
 - **`permitAndRun`** — EIP-2612 self-submit: `permit(owner=msg.sender, SF, value)`
   then pull; no Permit2, no standing approve.
 - **Trust model = a router**: stateless, no owner, permissionless — funds are
   never parked in it across transactions.
 
 ### Terminal-invariant scope
-The zero-balance check covers every token **named** in `splits` plus native ETH.
+The zero-balance check covers every token **named** in `splits` plus any native
+ETH the call introduced (msg.value or hook-produced; pre-existing native is
+tolerated so it can't censor, and a named native split still sweeps it).
 A hook that produces a token *not named* in the plan would leave it in the
 forwarder, permissionlessly claimable. A normal swap outputs
 exactly the buy token, which the plan names — so this doesn't arise in these
